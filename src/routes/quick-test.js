@@ -52,6 +52,9 @@ router.post('/start', async (req, res) => {
       personality,
       firstQuestion,
       mode: 'QUICK_TEST',
+      totalQuestions: 3,
+      answeredCount: 0,
+      currentQuestion: 1,
       questionsRemaining: 3,
     });
   } catch (error) {
@@ -118,6 +121,10 @@ router.post('/answer', async (req, res) => {
 
       return res.json({
         isComplete: true,
+        totalQuestions: 3,
+        answeredCount: answerCount,
+        currentQuestion: 3,
+        questionsRemaining: 0,
         score: evaluation.score,
         strengths: evaluation.strengths,
         weaknesses: evaluation.weaknesses,
@@ -147,6 +154,9 @@ router.post('/answer', async (req, res) => {
 
     res.json({
       teacherResponse,
+      totalQuestions: 3,
+      answeredCount: answerCount,
+      currentQuestion: answerCount + 1,
       questionsRemaining: Math.max(0, 3 - answerCount),
       isComplete: false,
     });
