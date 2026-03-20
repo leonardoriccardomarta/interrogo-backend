@@ -6,6 +6,12 @@ import aiService from '../ai-service.js';
 const router = express.Router();
 const prisma = new PrismaClient();
 
+const getTargetQuestionsFromDifficulty = (difficulty) => {
+  if (difficulty <= 3) return 3;
+  if (difficulty <= 7) return 4;
+  return 5;
+};
+
 // Middleware to verify token for all interrogo routes
 router.use(verifyToken);
 
@@ -75,6 +81,7 @@ router.post('/start', async (req, res) => {
       topic: session.topic,
       difficulty: session.difficulty,
       personality: session.personality,
+      targetQuestions: getTargetQuestionsFromDifficulty(session.difficulty),
       firstQuestion: firstQuestion,
     });
   } catch (error) {
@@ -130,6 +137,56 @@ router.post('/message', async (req, res) => {
       },
     });
 
+    const targetQuestions = getTargetQuestionsFromDifficulty(session.difficulty);
+    const teacherQuestionCount = session.messages.filter((m) => m.role === 'teacher').length;
+
+    // Convert messages to conversation format and include current answer
+    const evaluationConversation = [
+      ...session.messages.map((m) => ({
+        role: m.role === 'teacher' ? 'assistant' : 'user',
+        content: m.content,
+      })),
+      {
+        role: 'user',
+        content: message,
+      },
+    ];
+
+    // Auto-complete after target number of questions (3-5 based on difficulty)
+    if (teacherQuestionCount >= targetQuestions) {
+      const evaluation = await aiService.evaluateSession(
+        session.contentPreview || '',
+        evaluationConversation,
+        session.personality
+      );
+
+      await prisma.interrogoSession.update({
+        where: { id: sessionId },
+        data: {
+          finalScore: evaluation.score,
+          finalFeedback: JSON.stringify(evaluation),
+          endedAt: new Date(),
+        },
+      });
+
+      return res.json({
+        isComplete: true,
+        score: evaluation.score,
+        strengths: evaluation.strengths,
+        weaknesses: evaluation.weaknesses,
+        suggestions: evaluation.suggestions,
+        rubric: evaluation.rubric,
+        studyPlan: evaluation.studyPlan,
+        kpis: evaluation.kpis,
+        message: 'Interrogazione completata.',
+      });
+    }
+
+    const isWeakAnswer = message.trim().length < 24 || /non lo so|boh|non ricordo|non saprei/i.test(message);
+    const adaptiveMessage = isWeakAnswer
+      ? `${message}\n\n[Nota didattica: la risposta è incompleta. Fai una domanda di recupero guidata e poi verifica la comprensione.]`
+      : message;
+
     // Prepare conversation history for AI (last 10 messages)
     const recentMessages = session.messages.slice(-10).map(m => ({
       role: m.role === 'teacher' ? 'assistant' : 'user',
@@ -138,7 +195,7 @@ router.post('/message', async (req, res) => {
 
     recentMessages.push({
       role: 'user',
-      content: message,
+      content: adaptiveMessage,
     });
 
     // Generate teacher response
@@ -159,8 +216,12 @@ router.post('/message', async (req, res) => {
     });
 
     res.json({
+      isComplete: false,
       studentMessage: message,
       teacherResponse: teacherResponse,
+      targetQuestions,
+      currentQuestion: teacherQuestionCount + 1,
+      questionsRemaining: Math.max(0, targetQuestions - teacherQuestionCount),
       messageCount: session.messages.length + 2, // +2 for new messages
     });
   } catch (error) {
@@ -225,11 +286,7 @@ router.post('/end', async (req, res) => {
       where: { id: sessionId },
       data: {
         finalScore: evaluation.score,
-        finalFeedback: JSON.stringify({
-          strengths: evaluation.strengths,
-          weaknesses: evaluation.weaknesses,
-          suggestions: evaluation.suggestions,
-        }),
+        finalFeedback: JSON.stringify(evaluation),
         endedAt: new Date(),
       },
     });
@@ -241,6 +298,9 @@ router.post('/end', async (req, res) => {
       strengths: evaluation.strengths,
       weaknesses: evaluation.weaknesses,
       suggestions: evaluation.suggestions,
+      rubric: evaluation.rubric,
+      studyPlan: evaluation.studyPlan,
+      kpis: evaluation.kpis,
       duration: Math.round((updatedSession.endedAt - updatedSession.createdAt) / 1000 / 60), // minutes
     });
   } catch (error) {
@@ -340,6 +400,7 @@ router.get('/list/all', async (req, res) => {
         difficulty: session.difficulty,
         personality: session.personality,
         finalScore: session.finalScore,
+        finalFeedback: session.finalFeedback,
         createdAt: session.createdAt,
         endedAt: session.endedAt,
         studentAnswerCount,
