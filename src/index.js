@@ -22,6 +22,22 @@ app.use(cors({
 app.use(express.json());
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
+// API index route
+app.get('/', (req, res) => {
+  res.json({
+    service: 'Interrogo AI Backend',
+    status: 'running',
+    docs: {
+      health: 'GET /health',
+      signup: 'POST /api/auth/signup',
+      login: 'POST /api/auth/login',
+      me: 'GET /api/auth/me',
+      interrogoStart: 'POST /api/interrogo/start',
+      quickTestStart: 'POST /api/quick-test/start',
+    },
+  });
+});
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
