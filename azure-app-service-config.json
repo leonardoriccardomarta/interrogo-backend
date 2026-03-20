@@ -1,0 +1,58 @@
+{
+  "name": "interrogo-backend-prod",
+  "description": "Interrogo AI Backend - Azure App Service",
+  "appServicePlan": {
+    "sku": "B1",
+    "isLinux": true,
+    "numberOfWorkers": 1
+  },
+  "appSettings": [
+    {
+      "name": "WEBSITE_NODE_DEFAULT_VERSION",
+      "value": "18-lts"
+    },
+    {
+      "name": "PORT",
+      "value": "8080"
+    },
+    {
+      "name": "NODE_ENV",
+      "value": "production"
+    },
+    {
+      "name": "DATABASE_URL",
+      "value": "postgresql://user:password@host:5432/dbname",
+      "slotSetting": false
+    },
+    {
+      "name": "GROQ_API_KEY",
+      "value": "your_groq_api_key",
+      "slotSetting": false
+    },
+    {
+      "name": "JWT_SECRET",
+      "value": "your_jwt_secret",
+      "slotSetting": false
+    },
+    {
+      "name": "FRONTEND_URL",
+      "value": "https://interrogo-frontend.azurestaticapps.net",
+      "slotSetting": false
+    },
+    {
+      "name": "WEBSITES_ENABLE_APP_SERVICE_STORAGE",
+      "value": "true"
+    }
+  ],
+  "connectionStrings": [
+    {
+      "name": "DefaultConnection",
+      "value": "postgresql://user:password@host:5432/dbname",
+      "type": "PostgreSQL"
+    }
+  ],
+  "startupCommand": "npx prisma migrate deploy && node src/index.js",
+  "alwaysOn": true,
+  "healthCheckPath": "/health",
+  "linuxFxVersion": "NODE|18-lts"
+}

@@ -1,0 +1,64 @@
+// Interrogo AI Prisma Schema
+// PostgreSQL database setup
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// User model
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String
+  firstName String?
+  lastName  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  sessions InterrogoSession[]
+
+  @@map("users")
+}
+
+// Interrogation Session
+model InterrogoSession {
+  id                String              @id @default(cuid())
+  userId            String
+  topic             String
+  difficulty        Int                 @default(5) // 1-10
+  personality       String              @default("supportive") // strict | supportive
+  contentPreview    String? // First 500 chars of content
+  finalScore        Float? // 0-10
+  finalFeedback     String? // JSON: { strengths: [], weaknesses: [], suggestions: [] }
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  endedAt           DateTime?
+
+  // Relations
+  user              User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages          InterrogoMessage[]
+
+  @@index([userId])
+  @@map("interrogo_sessions")
+}
+
+// Interrogation Messages (conversation history)
+model InterrogoMessage {
+  id        String   @id @default(cuid())
+  sessionId String
+  role      String   // "teacher" | "student"
+  content   String   @db.Text
+  createdAt DateTime @default(now())
+
+  // Relations
+  session   InterrogoSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@map("interrogo_messages")
+}
