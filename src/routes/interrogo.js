@@ -19,6 +19,230 @@ const isWeakAnswer = (text) => {
 
 const normalizeTopicKey = (topic) => (topic || '').trim().toLowerCase();
 
+const getTutorEmailSet = () => {
+  const raw = process.env.TUTOR_EMAILS || '';
+  return new Set(
+    raw
+      .split(',')
+      .map((email) => email.trim().toLowerCase())
+      .filter(Boolean)
+  );
+};
+
+const requireTutor = (req, res, next) => {
+  const tutorEmails = getTutorEmailSet();
+  const email = (req.userEmail || '').toLowerCase();
+
+  if (!tutorEmails.has(email)) {
+    return res.status(403).json({ error: 'Tutor access required' });
+  }
+
+  next();
+};
+
+const moderationPatterns = [
+  { key: 'credential', level: 'high', pattern: /\b(password|passwd|pwd)\b\s*[:=]/i },
+  { key: 'secret', level: 'high', pattern: /\b(api[_-]?key|secret[_-]?key|token)\b\s*[:=]/i },
+  { key: 'financial', level: 'high', pattern: /\b(?:\d[ -]*?){13,19}\b/ },
+  { key: 'personal-id', level: 'medium', pattern: /\b(codice fiscale|iban|documento)\b/i },
+  { key: 'unsafe-prompt', level: 'medium', pattern: /ignora le regole|bypass|disattiva guardrail/i },
+];
+
+const moderationAudit = [];
+
+const sanitizeUserText = (text) => String(text || '').replace(/\s+/g, ' ').trim();
+
+const evaluateModeration = (text) => {
+  const matches = moderationPatterns
+    .filter((entry) => entry.pattern.test(text))
+    .map((entry) => ({ key: entry.key, level: entry.level }));
+
+  if (!matches.length) {
+    return { blocked: false, matches: [], maxLevel: null };
+  }
+
+  const maxLevel = matches.some((m) => m.level === 'high') ? 'high' : 'medium';
+  return {
+    blocked: true,
+    matches,
+    maxLevel,
+  };
+};
+
+const appendModerationAudit = (entry) => {
+  moderationAudit.push(entry);
+  if (moderationAudit.length > 300) {
+    moderationAudit.shift();
+  }
+};
+
+const splitIntoChunks = (text, chunkSize = 900) => {
+  const normalized = String(text || '').replace(/\r/g, '');
+  const paragraphs = normalized.split('\n\n').map((p) => p.trim()).filter(Boolean);
+  const chunks = [];
+
+  let current = '';
+  let currentStart = 0;
+
+  for (const paragraph of paragraphs) {
+    if (!current) {
+      current = paragraph;
+      continue;
+    }
+
+    if ((current + '\n\n' + paragraph).length <= chunkSize) {
+      current += `\n\n${paragraph}`;
+    } else {
+      chunks.push({
+        text: current,
+        start: currentStart,
+      });
+      currentStart += current.length;
+      current = paragraph;
+    }
+  }
+
+  if (current) {
+    chunks.push({ text: current, start: currentStart });
+  }
+
+  return chunks;
+};
+
+const estimateChunkConfidence = (chunk) => {
+  const hasDefinition = /definizione|si definisce|teorema|principio/i.test(chunk);
+  const hasFormula = /(=|\+|\-|\*|\/|\^|\(|\))/i.test(chunk);
+  const hasDate = /\b(1[0-9]{3}|20[0-9]{2})\b/.test(chunk);
+  const score = [hasDefinition, hasFormula, hasDate].filter(Boolean).length;
+  return parseFloat((0.4 + score * 0.2).toFixed(2));
+};
+
+const buildManualIndex = (text) => {
+  const lines = String(text || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const chapters = [];
+  const definitions = [];
+  const formulas = [];
+  const dates = [];
+
+  const chapterRegex = /^(capitolo|chapter|unit[aà]|lezione)\s*\d*/i;
+  const definitionRegex = /^(definizione|si definisce|[a-zàèéìòù\-\s]{3,40}\s*:\s+)/i;
+  const formulaRegex = /(=|\+|\-|\*|\/|\^|\(|\)|\bformula\b|\bteorema\b|\blegge\b)/i;
+  const dateRegex = /\b(1[0-9]{3}|20[0-9]{2})\b|\b\d{1,2}\s+(gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre)\b/i;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const page = Math.floor(i / 45) + 1;
+
+    if (chapterRegex.test(line) && chapters.length < 24) {
+      chapters.push({ title: line.slice(0, 120), citation: `da pagina ${page}` });
+    }
+
+    if (definitionRegex.test(line) && definitions.length < 60) {
+      definitions.push({ text: line.slice(0, 180), citation: `da pagina ${page}` });
+    }
+
+    if (formulaRegex.test(line) && /\d|=/.test(line) && formulas.length < 60) {
+      formulas.push({ text: line.slice(0, 180), citation: `da pagina ${page}` });
+    }
+
+    if (dateRegex.test(line) && dates.length < 60) {
+      dates.push({ text: line.slice(0, 180), citation: `da pagina ${page}` });
+    }
+  }
+
+  return {
+    chapters,
+    definitions,
+    formulas,
+    dates,
+    chunks: splitIntoChunks(text).slice(0, 80).map((chunk, idx) => ({
+      id: idx + 1,
+      excerpt: chunk.text.slice(0, 240),
+      citation: `da pagina ${Math.floor((chunk.start || 0) / (45 * 80)) + 1}`,
+      confidence: estimateChunkConfidence(chunk.text),
+      tags: [
+        /definizione|si definisce/i.test(chunk.text) ? 'definition' : null,
+        /(=|\+|\-|\*|\/|\^)/.test(chunk.text) ? 'formula' : null,
+        /\b(1[0-9]{3}|20[0-9]{2})\b/.test(chunk.text) ? 'date' : null,
+      ].filter(Boolean),
+    })),
+    summary: {
+      chapterCount: chapters.length,
+      definitionCount: definitions.length,
+      formulaCount: formulas.length,
+      dateCount: dates.length,
+    },
+  };
+};
+
+const toCsv = (rows) => {
+  if (!rows.length) return '';
+  const headers = Object.keys(rows[0]);
+  const escape = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+  const lines = [headers.map(escape).join(',')];
+  for (const row of rows) {
+    lines.push(headers.map((header) => escape(row[header])).join(','));
+  }
+  return lines.join('\n');
+};
+
+const buildPersonalityDirective = ({ personality, weakAnswer, questionIndex, targetQuestions }) => {
+  if (personality === 'strict') {
+    if (weakAnswer) {
+      return [
+        'Regola stile severo:',
+        '- Apri con una valutazione breve e diretta (massimo 8 parole).',
+        '- Niente suggerimenti gratuiti: chiedi precisione.',
+        '- Fai UNA domanda di recupero mirata.',
+      ].join('\n');
+    }
+
+    return [
+      'Regola stile severo:',
+      '- Riconosci il livello in modo sobrio, senza complimenti eccessivi.',
+      '- Alza leggermente l\'asticella nella prossima domanda.',
+      `- Stato sessione: domanda ${questionIndex}/${targetQuestions}.`,
+    ].join('\n');
+  }
+
+  if (weakAnswer) {
+    return [
+      'Regola stile incoraggiante:',
+      '- Apri con una frase di supporto breve.',
+      '- Dai un micro-indizio (massimo 1 frase).',
+      '- Fai UNA domanda guidata per verificare la comprensione.',
+    ].join('\n');
+  }
+
+  return [
+    'Regola stile incoraggiante:',
+    '- Valida la parte corretta della risposta in modo concreto.',
+    '- Estendi con una domanda collegata ma accessibile.',
+    `- Stato sessione: domanda ${questionIndex}/${targetQuestions}.`,
+  ].join('\n');
+};
+
+const enforcePersonalityFrame = (personality, text, weakAnswer) => {
+  const content = (text || '').trim();
+  if (!content) return content;
+
+  if (personality === 'strict') {
+    const prefix = weakAnswer
+      ? 'Valutazione rapida: risposta insufficiente. '
+      : 'Valutazione rapida: livello accettabile, resta preciso. ';
+    return content.startsWith('Valutazione rapida:') ? content : `${prefix}${content}`;
+  }
+
+  const prefix = weakAnswer
+    ? 'Ci siamo, ripartiamo con calma. '
+    : 'Ottimo, continuiamo a consolidare. ';
+  return content.startsWith('Ci siamo,') || content.startsWith('Ottimo,') ? content : `${prefix}${content}`;
+};
+
 async function analyzeWithAzureDocumentIntelligence(base64Pdf) {
   const endpoint = process.env.AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT;
   const apiKey = process.env.AZURE_DOCUMENT_INTELLIGENCE_KEY;
@@ -96,9 +320,10 @@ router.post('/start', async (req, res) => {
   try {
     const { topic, difficulty, personality, content } = req.body;
     const userId = req.userId;
+    const cleanedContent = sanitizeUserText(content);
 
     // Validation
-    if (!topic || !content) {
+    if (!topic || !cleanedContent) {
       return res.status(400).json({ error: 'Argomento e contenuto sono richiesti' });
     }
 
@@ -110,12 +335,24 @@ router.post('/start', async (req, res) => {
       return res.status(400).json({ error: 'Personalità deve essere "strict" o "supportive"' });
     }
 
-    if (content.length < 10) {
+    if (cleanedContent.length < 10) {
       return res.status(400).json({ error: 'Contenuto deve essere almeno 10 caratteri' });
     }
 
+    const moderation = evaluateModeration(cleanedContent);
+    if (moderation.blocked) {
+      appendModerationAudit({
+        at: new Date().toISOString(),
+        userId,
+        endpoint: '/start',
+        level: moderation.maxLevel,
+        matches: moderation.matches,
+      });
+      return res.status(400).json({ error: 'Contenuto bloccato dai guardrail di sicurezza. Rimuovi dati sensibili e riprova.' });
+    }
+
     // Truncate content preview
-    const contentPreview = content.substring(0, 500);
+    const contentPreview = cleanedContent.substring(0, 500);
 
     // Create session
     const session = await prisma.interrogoSession.create({
@@ -137,7 +374,7 @@ router.post('/start', async (req, res) => {
     ];
 
     const firstQuestion = await aiService.generateQuestion(
-      content,
+      cleanedContent,
       conversationHistory,
       difficulty,
       personality
@@ -176,10 +413,23 @@ router.post('/message', async (req, res) => {
   try {
     const { sessionId, message } = req.body;
     const userId = req.userId;
+    const cleanedMessage = sanitizeUserText(message);
 
     // Validation
-    if (!sessionId || !message) {
+    if (!sessionId || !cleanedMessage) {
       return res.status(400).json({ error: 'Session ID and message are required' });
+    }
+
+    const moderation = evaluateModeration(cleanedMessage);
+    if (moderation.blocked) {
+      appendModerationAudit({
+        at: new Date().toISOString(),
+        userId,
+        endpoint: '/message',
+        level: moderation.maxLevel,
+        matches: moderation.matches,
+      });
+      return res.status(400).json({ error: 'Messaggio bloccato dai guardrail di sicurezza. Rimuovi dati sensibili e riprova.' });
     }
 
     // Get session
@@ -209,7 +459,7 @@ router.post('/message', async (req, res) => {
       data: {
         sessionId,
         role: 'student',
-        content: message,
+        content: cleanedMessage,
       },
     });
 
@@ -224,7 +474,7 @@ router.post('/message', async (req, res) => {
       })),
       {
         role: 'user',
-        content: message,
+        content: cleanedMessage,
       },
     ];
 
@@ -258,10 +508,14 @@ router.post('/message', async (req, res) => {
       });
     }
 
-    const weakAnswer = isWeakAnswer(message);
-    const adaptiveMessage = weakAnswer
-      ? `${message}\n\n[Nota didattica: la risposta è incompleta. Fai una domanda di recupero guidata e poi verifica la comprensione.]`
-      : message;
+    const weakAnswer = isWeakAnswer(cleanedMessage);
+    const personalityDirective = buildPersonalityDirective({
+      personality: session.personality,
+      weakAnswer,
+      questionIndex: teacherQuestionCount + 1,
+      targetQuestions,
+    });
+    const adaptiveMessage = `${cleanedMessage}\n\n[${personalityDirective}]`;
 
     // Prepare conversation history for AI (last 10 messages)
     const recentMessages = session.messages.slice(-10).map(m => ({
@@ -275,12 +529,13 @@ router.post('/message', async (req, res) => {
     });
 
     // Generate teacher response
-    const teacherResponse = await aiService.generateQuestion(
+    const rawTeacherResponse = await aiService.generateQuestion(
       session.contentPreview || '',
       recentMessages,
       session.difficulty,
       session.personality
     );
+    const teacherResponse = enforcePersonalityFrame(session.personality, rawTeacherResponse, weakAnswer);
 
     // Save teacher message
     await prisma.interrogoMessage.create({
@@ -293,7 +548,7 @@ router.post('/message', async (req, res) => {
 
     res.json({
       isComplete: false,
-      studentMessage: message,
+      studentMessage: cleanedMessage,
       teacherResponse: teacherResponse,
       targetQuestions,
       currentQuestion: teacherQuestionCount + 1,
@@ -466,6 +721,38 @@ router.post('/ocr', async (req, res) => {
   }
 });
 
+// Manual textbook semantic index (chapters, definitions, formulas, dates)
+router.post('/manual-index', async (req, res) => {
+  try {
+    const { content } = req.body;
+
+    if (!content || typeof content !== 'string') {
+      return res.status(400).json({ error: 'content is required' });
+    }
+
+    const indexed = buildManualIndex(content);
+    return res.json(indexed);
+  } catch (error) {
+    console.error('❌ Manual index error:', error);
+    return res.status(500).json({ error: 'Failed to build manual index' });
+  }
+});
+
+router.get('/moderation/policy', requireTutor, async (req, res) => {
+  return res.json({
+    mode: 'enforced',
+    levels: ['medium', 'high'],
+    rules: moderationPatterns.map((r) => ({ key: r.key, level: r.level })),
+  });
+});
+
+router.get('/moderation/audit', requireTutor, async (req, res) => {
+  return res.json({
+    total: moderationAudit.length,
+    recent: moderationAudit.slice(-100).reverse(),
+  });
+});
+
 // Analytics overview (4-week trend + weak topics + KPI)
 router.get('/analytics/overview', async (req, res) => {
   try {
@@ -491,11 +778,32 @@ router.get('/analytics/overview', async (req, res) => {
     const recentSessions = sessions.filter((s) => new Date(s.createdAt) >= fourWeeksAgo && s.finalScore !== null);
 
     const weeklyBuckets = [0, 0, 0, 0].map(() => ({ count: 0, total: 0 }));
+    const criterionWeeklyAcc = {};
     for (const s of recentSessions) {
       const diffDays = Math.floor((Date.now() - new Date(s.createdAt).getTime()) / (1000 * 60 * 60 * 24));
       const bucket = Math.min(3, Math.floor(diffDays / 7));
       weeklyBuckets[bucket].count += 1;
       weeklyBuckets[bucket].total += Number(s.finalScore || 0);
+
+      if (s.finalFeedback) {
+        try {
+          const parsed = JSON.parse(s.finalFeedback);
+          for (const c of parsed?.rubric?.criteria || []) {
+            if (!c?.key || typeof c?.score !== 'number') continue;
+            if (!criterionWeeklyAcc[c.key]) {
+              criterionWeeklyAcc[c.key] = {
+                key: c.key,
+                label: c.label || c.key,
+                buckets: [0, 0, 0, 0].map(() => ({ total: 0, count: 0 })),
+              };
+            }
+            criterionWeeklyAcc[c.key].buckets[bucket].total += c.score;
+            criterionWeeklyAcc[c.key].buckets[bucket].count += 1;
+          }
+        } catch {
+          // ignore malformed feedback
+        }
+      }
     }
 
     const weeklyTrend = weeklyBuckets
@@ -504,6 +812,20 @@ router.get('/analytics/overview', async (req, res) => {
         avgScore: b.count > 0 ? parseFloat((b.total / b.count).toFixed(1)) : null,
       }))
       .reverse();
+
+    const competencyTimeline = Object.values(criterionWeeklyAcc)
+      .map((entry) => ({
+        key: entry.key,
+        label: entry.label,
+        weeklyScores: entry.buckets
+          .map((b) => (b.count > 0 ? parseFloat((b.total / b.count).toFixed(1)) : null))
+          .reverse(),
+      }))
+      .sort((a, b) => {
+        const aLast = a.weeklyScores[a.weeklyScores.length - 1] ?? 0;
+        const bLast = b.weeklyScores[b.weeklyScores.length - 1] ?? 0;
+        return aLast - bLast;
+      });
 
     const topicAgg = {};
     let totalDontKnow = 0;
@@ -584,6 +906,7 @@ router.get('/analytics/overview', async (req, res) => {
 
     return res.json({
       weeklyTrend,
+      competencyTimeline,
       weakTopics,
       kpis: {
         avgResponseTimeSeconds: responseTimeSamples > 0
@@ -596,6 +919,163 @@ router.get('/analytics/overview', async (req, res) => {
   } catch (error) {
     console.error('❌ Analytics overview error:', error);
     return res.status(500).json({ error: 'Failed to compute analytics overview' });
+  }
+});
+
+// Tutor dashboard overview (B2School)
+router.get('/teacher/overview', requireTutor, async (req, res) => {
+  try {
+    const sessions = await prisma.interrogoSession.findMany({
+      include: {
+        user: {
+          select: {
+            email: true,
+            firstName: true,
+            lastName: true,
+          },
+        },
+        messages: {
+          select: {
+            role: true,
+            content: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const byClass = {};
+    const studentMap = {};
+    const topicMap = {};
+    let totalAnswers = 0;
+    let dontKnow = 0;
+
+    for (const s of sessions) {
+      const email = s.user?.email || 'unknown@student.local';
+      const classLabel = email.includes('@') ? email.split('@')[1] : 'classe-generale';
+      const studentKey = email.toLowerCase();
+
+      if (!byClass[classLabel]) {
+        byClass[classLabel] = { className: classLabel, sessions: 0, totalScore: 0, scoreCount: 0, students: new Set() };
+      }
+
+      byClass[classLabel].sessions += 1;
+      byClass[classLabel].students.add(studentKey);
+      if (s.finalScore !== null) {
+        byClass[classLabel].totalScore += Number(s.finalScore);
+        byClass[classLabel].scoreCount += 1;
+      }
+
+      if (!studentMap[studentKey]) {
+        studentMap[studentKey] = {
+          studentEmail: email,
+          studentName: [s.user?.firstName, s.user?.lastName].filter(Boolean).join(' ') || email,
+          className: classLabel,
+          exams: 0,
+          totalScore: 0,
+          scoreCount: 0,
+          dontKnowCount: 0,
+          answerCount: 0,
+        };
+      }
+
+      studentMap[studentKey].exams += 1;
+      if (s.finalScore !== null) {
+        studentMap[studentKey].totalScore += Number(s.finalScore);
+        studentMap[studentKey].scoreCount += 1;
+      }
+
+      const topicKey = normalizeTopicKey(s.topic);
+      if (!topicMap[topicKey]) {
+        topicMap[topicKey] = { topic: s.topic, exams: 0, totalScore: 0, scoreCount: 0 };
+      }
+      topicMap[topicKey].exams += 1;
+      if (s.finalScore !== null) {
+        topicMap[topicKey].totalScore += Number(s.finalScore);
+        topicMap[topicKey].scoreCount += 1;
+      }
+
+      for (const msg of s.messages || []) {
+        if (msg.role !== 'student') continue;
+        totalAnswers += 1;
+        studentMap[studentKey].answerCount += 1;
+        if (/non lo so|boh|non ricordo|non saprei/i.test(msg.content || '')) {
+          dontKnow += 1;
+          studentMap[studentKey].dontKnowCount += 1;
+        }
+      }
+    }
+
+    const classOverview = Object.values(byClass).map((c) => ({
+      className: c.className,
+      sessions: c.sessions,
+      students: c.students.size,
+      avgScore: c.scoreCount > 0 ? parseFloat((c.totalScore / c.scoreCount).toFixed(1)) : null,
+    }));
+
+    const students = Object.values(studentMap)
+      .map((s) => ({
+        ...s,
+        avgScore: s.scoreCount > 0 ? parseFloat((s.totalScore / s.scoreCount).toFixed(1)) : null,
+        dontKnowRate: s.answerCount > 0 ? parseFloat((s.dontKnowCount / s.answerCount).toFixed(2)) : 0,
+      }))
+      .sort((a, b) => (a.avgScore ?? 0) - (b.avgScore ?? 0));
+
+    const weakTopics = Object.values(topicMap)
+      .map((t) => ({
+        topic: t.topic,
+        exams: t.exams,
+        avgScore: t.scoreCount > 0 ? parseFloat((t.totalScore / t.scoreCount).toFixed(1)) : null,
+      }))
+      .sort((a, b) => (a.avgScore ?? 0) - (b.avgScore ?? 0))
+      .slice(0, 12);
+
+    return res.json({
+      classOverview,
+      students,
+      weakTopics,
+      kpis: {
+        totalStudents: students.length,
+        totalSessions: sessions.length,
+        dontKnowRate: totalAnswers > 0 ? parseFloat((dontKnow / totalAnswers).toFixed(2)) : 0,
+      },
+    });
+  } catch (error) {
+    console.error('❌ Teacher overview error:', error);
+    return res.status(500).json({ error: 'Failed to compute teacher overview' });
+  }
+});
+
+// Tutor export report CSV
+router.get('/teacher/report.csv', requireTutor, async (req, res) => {
+  try {
+    const sessions = await prisma.interrogoSession.findMany({
+      include: {
+        user: {
+          select: { email: true, firstName: true, lastName: true },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const rows = sessions.map((s) => ({
+      date: new Date(s.createdAt).toISOString(),
+      studentEmail: s.user?.email || '',
+      studentName: [s.user?.firstName, s.user?.lastName].filter(Boolean).join(' '),
+      topic: s.topic,
+      difficulty: s.difficulty,
+      personality: s.personality,
+      finalScore: s.finalScore ?? '',
+      ended: s.endedAt ? 'yes' : 'no',
+    }));
+
+    const csv = toCsv(rows);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="teacher-report.csv"');
+    return res.send(csv);
+  } catch (error) {
+    console.error('❌ Teacher CSV export error:', error);
+    return res.status(500).json({ error: 'Failed to export teacher report' });
   }
 });
 

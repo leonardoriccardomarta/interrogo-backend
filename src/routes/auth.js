@@ -6,6 +6,21 @@ import { generateToken, verifyToken } from '../middleware/auth.js';
 const router = express.Router();
 const prisma = new PrismaClient();
 
+const getTutorEmailSet = () => {
+  const raw = process.env.TUTOR_EMAILS || '';
+  return new Set(
+    raw
+      .split(',')
+      .map((email) => email.trim().toLowerCase())
+      .filter(Boolean)
+  );
+};
+
+const getUserRoleFromEmail = (email) => {
+  const tutorEmails = getTutorEmailSet();
+  return tutorEmails.has((email || '').toLowerCase()) ? 'tutor' : 'student';
+};
+
 // Signup
 router.post('/signup', async (req, res) => {
   try {
@@ -53,6 +68,7 @@ router.post('/signup', async (req, res) => {
         email: user.email,
         firstName: user.firstName,
         lastName: user.lastName,
+        role: getUserRoleFromEmail(user.email),
       },
     });
   } catch (error) {
@@ -98,6 +114,7 @@ router.post('/login', async (req, res) => {
         email: user.email,
         firstName: user.firstName,
         lastName: user.lastName,
+        role: getUserRoleFromEmail(user.email),
       },
     });
   } catch (error) {
@@ -124,11 +141,26 @@ router.get('/me', verifyToken, async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    res.json(user);
+    res.json({
+      ...user,
+      role: getUserRoleFromEmail(user.email),
+    });
   } catch (error) {
     console.error('❌ Get user error:', error);
     res.status(500).json({ error: 'Failed to fetch user' });
   }
+});
+
+// Retention policy info (GDPR transparency)
+router.get('/retention-policy', (req, res) => {
+  const sessionRetentionDays = Number(process.env.DATA_RETENTION_DAYS || 365);
+  res.json({
+    policyVersion: '1.0',
+    sessionRetentionDays,
+    accountDeletion: 'Immediate hard delete on user request via DELETE /api/auth/delete-account',
+    exportEndpoint: 'GET /api/auth/export-data',
+    updatedAt: new Date().toISOString(),
+  });
 });
 
 // Export account data (GDPR portability)
