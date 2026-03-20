@@ -131,4 +131,61 @@ router.get('/me', verifyToken, async (req, res) => {
   }
 });
 
+// Export account data (GDPR portability)
+router.get('/export-data', verifyToken, async (req, res) => {
+  try {
+    const userId = req.userId;
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        email: true,
+        firstName: true,
+        lastName: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+
+    const sessions = await prisma.interrogoSession.findMany({
+      where: { userId },
+      include: {
+        messages: {
+          orderBy: { createdAt: 'asc' },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    res.json({
+      exportedAt: new Date().toISOString(),
+      user,
+      sessions,
+    });
+  } catch (error) {
+    console.error('❌ Export data error:', error);
+    res.status(500).json({ error: 'Failed to export account data' });
+  }
+});
+
+// Delete account and all related data (GDPR erase)
+router.delete('/delete-account', verifyToken, async (req, res) => {
+  try {
+    const userId = req.userId;
+
+    await prisma.user.delete({
+      where: { id: userId },
+    });
+
+    res.json({
+      success: true,
+      message: 'Account deleted successfully',
+    });
+  } catch (error) {
+    console.error('❌ Delete account error:', error);
+    res.status(500).json({ error: 'Failed to delete account' });
+  }
+});
+
 export default router;
