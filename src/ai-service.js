@@ -182,7 +182,8 @@ Score 0-10 basato su comprensione, profondità, precisione.`;
       }
 
       try {
-        const evaluation = JSON.parse(responseText);
+        const jsonText = this.extractJsonObject(responseText);
+        const evaluation = JSON.parse(jsonText);
         return {
           score: Math.min(10, Math.max(0, evaluation.score || 6)),
           strengths: evaluation.strengths || ['Partecipazione all\'esame'],
@@ -191,8 +192,9 @@ Score 0-10 basato su comprensione, profondità, precisione.`;
         };
       } catch (parseError) {
         console.error('Failed to parse evaluation JSON:', responseText);
+        const fallbackScore = this.computeHeuristicScore(conversationHistory);
         return {
-          score: 6,
+          score: fallbackScore,
           strengths: ['Partecipazione all\'esame'],
           weaknesses: ['Aree da approfondire'],
           suggestions: ['Rileggi il materiale'],
@@ -207,6 +209,41 @@ Score 0-10 basato su comprensione, profondità, precisione.`;
 
       throw new Error(`Failed to evaluate session: ${error.message}`);
     }
+  }
+
+  extractJsonObject(text) {
+    const fencedMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (fencedMatch?.[1]) {
+      return fencedMatch[1].trim();
+    }
+
+    const first = text.indexOf('{');
+    const last = text.lastIndexOf('}');
+    if (first !== -1 && last !== -1 && last > first) {
+      return text.slice(first, last + 1);
+    }
+
+    return text;
+  }
+
+  computeHeuristicScore(conversationHistory) {
+    const studentMessages = conversationHistory.filter((m) => m.role === 'user');
+    if (studentMessages.length === 0) {
+      return 4;
+    }
+
+    const avgLength = studentMessages.reduce((acc, m) => acc + m.content.length, 0) / studentMessages.length;
+    const dontKnowCount = studentMessages.filter((m) => /non lo so/i.test(m.content)).length;
+    const dontKnowPenalty = Math.min(2, dontKnowCount * 0.5);
+
+    let base = 5.5;
+    if (avgLength > 220) base += 2.2;
+    else if (avgLength > 120) base += 1.4;
+    else if (avgLength > 60) base += 0.8;
+    else if (avgLength < 30) base -= 0.8;
+
+    const score = Math.max(3, Math.min(9.5, base - dontKnowPenalty));
+    return parseFloat(score.toFixed(1));
   }
 }
 

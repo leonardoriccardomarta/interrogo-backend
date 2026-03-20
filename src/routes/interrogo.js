@@ -318,21 +318,37 @@ router.get('/list/all', async (req, res) => {
     const sessions = await prisma.interrogoSession.findMany({
       where: { userId },
       orderBy: { createdAt: 'desc' },
-      select: {
-        id: true,
-        topic: true,
-        difficulty: true,
-        personality: true,
-        finalScore: true,
-        createdAt: true,
-        endedAt: true,
+      include: {
+        messages: {
+          select: {
+            role: true,
+          },
+        },
         _count: {
           select: { messages: true },
         },
       },
     });
 
-    res.json(sessions);
+    const summarizedSessions = sessions.map((session) => {
+      const studentAnswerCount = session.messages.filter((m) => m.role === 'student').length;
+      const teacherQuestionCount = session.messages.filter((m) => m.role === 'teacher').length;
+
+      return {
+        id: session.id,
+        topic: session.topic,
+        difficulty: session.difficulty,
+        personality: session.personality,
+        finalScore: session.finalScore,
+        createdAt: session.createdAt,
+        endedAt: session.endedAt,
+        studentAnswerCount,
+        teacherQuestionCount,
+        _count: session._count,
+      };
+    });
+
+    res.json(summarizedSessions);
   } catch (error) {
     console.error('❌ List sessions error:', error);
     res.status(500).json({ error: 'Failed to fetch sessions' });

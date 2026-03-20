@@ -88,10 +88,10 @@ router.post('/answer', async (req, res) => {
       data: { sessionId, role: 'student', content: message },
     });
 
-    const questionCount = session.messages.filter(m => m.role === 'teacher').length + 1;
+    const answerCount = session.messages.filter(m => m.role === 'student').length + 1;
 
     // Check if it's the last question
-    if (questionCount >= 3) {
+    if (answerCount >= 3) {
       // End test and provide quick evaluation
       const evaluationConversation = [
         ...session.messages.map(m => ({
@@ -147,7 +147,7 @@ router.post('/answer', async (req, res) => {
 
     res.json({
       teacherResponse,
-      questionsRemaining: 3 - questionCount,
+      questionsRemaining: Math.max(0, 3 - answerCount),
       isComplete: false,
     });
   } catch (error) {
