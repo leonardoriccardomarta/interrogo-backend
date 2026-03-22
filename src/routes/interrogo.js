@@ -7,10 +7,29 @@ import aiService from '../ai-service.js';
 const router = express.Router();
 const prisma = new PrismaClient();
 
-const getTargetQuestionsFromDifficulty = (difficulty) => {
-  if (difficulty <= 3) return 3;
-  if (difficulty <= 7) return 4;
-  return 5;
+const getTargetQuestionsFromDifficulty = (difficulty, examMode = 'standard') => {
+  let base;
+  if (difficulty <= 3) base = 5;
+  else if (difficulty <= 7) base = 7;
+  else base = 9;
+
+  const modeBonus = examMode === 'deep' ? 4 : examMode === 'extended' ? 2 : 0;
+  return Math.min(14, Math.max(4, base + modeBonus));
+};
+
+const deriveTopicFromContent = (content) => {
+  const lines = String(content || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const heading = lines.find((line) => /^(capitolo|unit[aà]|lezione|tema|argomento|chapter)/i.test(line));
+  if (heading) return heading.slice(0, 80);
+
+  const firstLong = lines.find((line) => line.length >= 20);
+  if (firstLong) return firstLong.slice(0, 80);
+
+  return 'Argomento dal materiale caricato';
 };
 
 const isWeakAnswer = (text) => {
@@ -19,21 +38,13 @@ const isWeakAnswer = (text) => {
 
 const normalizeTopicKey = (topic) => (topic || '').trim().toLowerCase();
 
-const getTutorEmailSet = () => {
-  const raw = process.env.TUTOR_EMAILS || '';
-  return new Set(
-    raw
-      .split(',')
-      .map((email) => email.trim().toLowerCase())
-      .filter(Boolean)
-  );
-};
+const requireTutor = async (req, res, next) => {
+  const user = await prisma.user.findUnique({
+    where: { id: req.userId },
+    select: { role: true },
+  });
 
-const requireTutor = (req, res, next) => {
-  const tutorEmails = getTutorEmailSet();
-  const email = (req.userEmail || '').toLowerCase();
-
-  if (!tutorEmails.has(email)) {
+  if (!user || !['TUTOR', 'ADMIN'].includes(user.role)) {
     return res.status(403).json({ error: 'Tutor access required' });
   }
 
@@ -47,8 +58,6 @@ const moderationPatterns = [
   { key: 'personal-id', level: 'medium', pattern: /\b(codice fiscale|iban|documento)\b/i },
   { key: 'unsafe-prompt', level: 'medium', pattern: /ignora le regole|bypass|disattiva guardrail/i },
 ];
-
-const moderationAudit = [];
 
 const sanitizeUserText = (text) => String(text || '').replace(/\s+/g, ' ').trim();
 
@@ -69,10 +78,19 @@ const evaluateModeration = (text) => {
   };
 };
 
-const appendModerationAudit = (entry) => {
-  moderationAudit.push(entry);
-  if (moderationAudit.length > 300) {
-    moderationAudit.shift();
+const appendModerationAudit = async (entry) => {
+  try {
+    await prisma.moderationEvent.create({
+      data: {
+        userId: entry.userId || null,
+        endpoint: entry.endpoint,
+        level: entry.level,
+        matches: JSON.stringify(entry.matches || []),
+        excerpt: entry.excerpt || null,
+      },
+    });
+  } catch (error) {
+    console.error('⚠️ Failed to persist moderation event:', error.message);
   }
 };
 
@@ -191,6 +209,16 @@ const toCsv = (rows) => {
 };
 
 const buildPersonalityDirective = ({ personality, weakAnswer, questionIndex, targetQuestions }) => {
+  if (personality === 'socratic') {
+    return [
+      'Regola stile socratico:',
+      '- Non dare la soluzione diretta.',
+      '- Usa 1 domanda guida per volta.',
+      weakAnswer ? '- Parti da concetti base e fai emergere il ragionamento.' : '- Aumenta la profondita con collegamenti causa-effetto.',
+      `- Stato sessione: domanda ${questionIndex}/${targetQuestions}.`,
+    ].join('\n');
+  }
+
   if (personality === 'strict') {
     if (weakAnswer) {
       return [
@@ -229,6 +257,13 @@ const buildPersonalityDirective = ({ personality, weakAnswer, questionIndex, tar
 const enforcePersonalityFrame = (personality, text, weakAnswer) => {
   const content = (text || '').trim();
   if (!content) return content;
+
+  if (personality === 'socratic') {
+    const prefix = weakAnswer
+      ? 'Guida socratica: partiamo dalle basi. '
+      : 'Guida socratica: ragiona passo per passo. ';
+    return content.startsWith('Guida socratica:') ? content : `${prefix}${content}`;
+  }
 
   if (personality === 'strict') {
     const prefix = weakAnswer
@@ -318,21 +353,23 @@ router.use(verifyToken);
 // Start Interrogation Session
 router.post('/start', async (req, res) => {
   try {
-    const { topic, difficulty, personality, content } = req.body;
+    const { topic, difficulty, personality, content, examMode: rawExamMode, targetQuestions: requestedTargetQuestions } = req.body;
     const userId = req.userId;
     const cleanedContent = sanitizeUserText(content);
+    const examMode = ['standard', 'extended', 'deep'].includes(rawExamMode) ? rawExamMode : 'standard';
+    const derivedTopic = topic?.trim() ? topic.trim() : deriveTopicFromContent(cleanedContent);
 
     // Validation
-    if (!topic || !cleanedContent) {
-      return res.status(400).json({ error: 'Argomento e contenuto sono richiesti' });
+    if (!cleanedContent) {
+      return res.status(400).json({ error: 'Contenuto richiesto' });
     }
 
     if (!difficulty || difficulty < 1 || difficulty > 10) {
       return res.status(400).json({ error: 'Difficoltà deve essere tra 1 e 10' });
     }
 
-    if (!["strict", "supportive"].includes(personality)) {
-      return res.status(400).json({ error: 'Personalità deve essere "strict" o "supportive"' });
+    if (!["strict", "supportive", "socratic"].includes(personality)) {
+      return res.status(400).json({ error: 'Personalità deve essere "strict", "supportive" o "socratic"' });
     }
 
     if (cleanedContent.length < 10) {
@@ -341,12 +378,13 @@ router.post('/start', async (req, res) => {
 
     const moderation = evaluateModeration(cleanedContent);
     if (moderation.blocked) {
-      appendModerationAudit({
+      await appendModerationAudit({
         at: new Date().toISOString(),
         userId,
         endpoint: '/start',
         level: moderation.maxLevel,
         matches: moderation.matches,
+        excerpt: cleanedContent.slice(0, 220),
       });
       return res.status(400).json({ error: 'Contenuto bloccato dai guardrail di sicurezza. Rimuovi dati sensibili e riprova.' });
     }
@@ -354,11 +392,15 @@ router.post('/start', async (req, res) => {
     // Truncate content preview
     const contentPreview = cleanedContent.substring(0, 500);
 
+    const targetQuestions = typeof requestedTargetQuestions === 'number'
+      ? Math.min(14, Math.max(4, Math.floor(requestedTargetQuestions)))
+      : getTargetQuestionsFromDifficulty(difficulty, examMode);
+
     // Create session
     const session = await prisma.interrogoSession.create({
       data: {
         userId,
-        topic,
+        topic: derivedTopic,
         difficulty,
         personality,
         contentPreview,
@@ -369,7 +411,7 @@ router.post('/start', async (req, res) => {
     const conversationHistory = [
       {
         role: 'user',
-        content: `Inizia le interrogazioni su questo argomento: ${topic}. Prima domanda.`,
+        content: `Inizia interrogazione basata SOLO sul materiale caricato. Argomento rilevato: ${derivedTopic}. Modalità: ${examMode}. Totale domande target: ${targetQuestions}. Prima domanda: specifica, non generica, e ancorata al materiale.`,
       },
     ];
 
@@ -394,7 +436,8 @@ router.post('/start', async (req, res) => {
       topic: session.topic,
       difficulty: session.difficulty,
       personality: session.personality,
-      targetQuestions: getTargetQuestionsFromDifficulty(session.difficulty),
+      examMode,
+      targetQuestions,
       firstQuestion: firstQuestion,
     });
   } catch (error) {
@@ -411,9 +454,10 @@ router.post('/start', async (req, res) => {
 // Send Message (user answer)
 router.post('/message', async (req, res) => {
   try {
-    const { sessionId, message } = req.body;
+    const { sessionId, message, targetQuestions: requestedTargetQuestions, examMode: rawExamMode } = req.body;
     const userId = req.userId;
     const cleanedMessage = sanitizeUserText(message);
+    const examMode = ['standard', 'extended', 'deep'].includes(rawExamMode) ? rawExamMode : 'standard';
 
     // Validation
     if (!sessionId || !cleanedMessage) {
@@ -422,12 +466,13 @@ router.post('/message', async (req, res) => {
 
     const moderation = evaluateModeration(cleanedMessage);
     if (moderation.blocked) {
-      appendModerationAudit({
+      await appendModerationAudit({
         at: new Date().toISOString(),
         userId,
         endpoint: '/message',
         level: moderation.maxLevel,
         matches: moderation.matches,
+        excerpt: cleanedMessage.slice(0, 220),
       });
       return res.status(400).json({ error: 'Messaggio bloccato dai guardrail di sicurezza. Rimuovi dati sensibili e riprova.' });
     }
@@ -463,8 +508,11 @@ router.post('/message', async (req, res) => {
       },
     });
 
-    const targetQuestions = getTargetQuestionsFromDifficulty(session.difficulty);
+    const targetQuestions = typeof requestedTargetQuestions === 'number'
+      ? Math.min(14, Math.max(4, Math.floor(requestedTargetQuestions)))
+      : getTargetQuestionsFromDifficulty(session.difficulty, examMode);
     const teacherQuestionCount = session.messages.filter((m) => m.role === 'teacher').length;
+    const answeredCount = session.messages.filter((m) => m.role === 'student').length + 1;
 
     // Convert messages to conversation format and include current answer
     const evaluationConversation = [
@@ -551,8 +599,8 @@ router.post('/message', async (req, res) => {
       studentMessage: cleanedMessage,
       teacherResponse: teacherResponse,
       targetQuestions,
-      currentQuestion: teacherQuestionCount + 1,
-      questionsRemaining: Math.max(0, targetQuestions - teacherQuestionCount),
+      currentQuestion: Math.min(targetQuestions, answeredCount + 1),
+      questionsRemaining: Math.max(0, targetQuestions - answeredCount),
       messageCount: session.messages.length + 2, // +2 for new messages
     });
   } catch (error) {
@@ -747,9 +795,35 @@ router.get('/moderation/policy', requireTutor, async (req, res) => {
 });
 
 router.get('/moderation/audit', requireTutor, async (req, res) => {
+  const recent = await prisma.moderationEvent.findMany({
+    orderBy: { createdAt: 'desc' },
+    take: 100,
+    select: {
+      createdAt: true,
+      endpoint: true,
+      level: true,
+      matches: true,
+      excerpt: true,
+      user: {
+        select: {
+          email: true,
+        },
+      },
+    },
+  });
+
+  const mapped = recent.map((evt) => ({
+    at: evt.createdAt,
+    endpoint: evt.endpoint,
+    level: evt.level,
+    matches: JSON.parse(evt.matches || '[]'),
+    excerpt: evt.excerpt,
+    userEmail: evt.user?.email || null,
+  }));
+
   return res.json({
-    total: moderationAudit.length,
-    recent: moderationAudit.slice(-100).reverse(),
+    total: mapped.length,
+    recent: mapped,
   });
 });
 
@@ -932,6 +1006,8 @@ router.get('/teacher/overview', requireTutor, async (req, res) => {
             email: true,
             firstName: true,
             lastName: true,
+            organization: true,
+            className: true,
           },
         },
         messages: {
@@ -952,11 +1028,19 @@ router.get('/teacher/overview', requireTutor, async (req, res) => {
 
     for (const s of sessions) {
       const email = s.user?.email || 'unknown@student.local';
-      const classLabel = email.includes('@') ? email.split('@')[1] : 'classe-generale';
+      const classLabel = s.user?.className || 'classe-non-assegnata';
+      const organization = s.user?.organization || 'organizzazione-non-assegnata';
       const studentKey = email.toLowerCase();
 
       if (!byClass[classLabel]) {
-        byClass[classLabel] = { className: classLabel, sessions: 0, totalScore: 0, scoreCount: 0, students: new Set() };
+        byClass[classLabel] = {
+          className: classLabel,
+          organization,
+          sessions: 0,
+          totalScore: 0,
+          scoreCount: 0,
+          students: new Set(),
+        };
       }
 
       byClass[classLabel].sessions += 1;
@@ -971,6 +1055,7 @@ router.get('/teacher/overview', requireTutor, async (req, res) => {
           studentEmail: email,
           studentName: [s.user?.firstName, s.user?.lastName].filter(Boolean).join(' ') || email,
           className: classLabel,
+          organization,
           exams: 0,
           totalScore: 0,
           scoreCount: 0,
@@ -1008,6 +1093,7 @@ router.get('/teacher/overview', requireTutor, async (req, res) => {
 
     const classOverview = Object.values(byClass).map((c) => ({
       className: c.className,
+      organization: c.organization,
       sessions: c.sessions,
       students: c.students.size,
       avgScore: c.scoreCount > 0 ? parseFloat((c.totalScore / c.scoreCount).toFixed(1)) : null,
@@ -1052,7 +1138,7 @@ router.get('/teacher/report.csv', requireTutor, async (req, res) => {
     const sessions = await prisma.interrogoSession.findMany({
       include: {
         user: {
-          select: { email: true, firstName: true, lastName: true },
+          select: { email: true, firstName: true, lastName: true, organization: true, className: true },
         },
       },
       orderBy: { createdAt: 'desc' },
@@ -1062,6 +1148,8 @@ router.get('/teacher/report.csv', requireTutor, async (req, res) => {
       date: new Date(s.createdAt).toISOString(),
       studentEmail: s.user?.email || '',
       studentName: [s.user?.firstName, s.user?.lastName].filter(Boolean).join(' '),
+      organization: s.user?.organization || '',
+      className: s.user?.className || '',
       topic: s.topic,
       difficulty: s.difficulty,
       personality: s.personality,

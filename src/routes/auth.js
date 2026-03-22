@@ -6,25 +6,18 @@ import { generateToken, verifyToken } from '../middleware/auth.js';
 const router = express.Router();
 const prisma = new PrismaClient();
 
-const getTutorEmailSet = () => {
-  const raw = process.env.TUTOR_EMAILS || '';
-  return new Set(
-    raw
-      .split(',')
-      .map((email) => email.trim().toLowerCase())
-      .filter(Boolean)
-  );
-};
+const mapRoleOut = (role) => String(role || 'STUDENT').toLowerCase();
 
-const getUserRoleFromEmail = (email) => {
-  const tutorEmails = getTutorEmailSet();
-  return tutorEmails.has((email || '').toLowerCase()) ? 'tutor' : 'student';
+const normalizeRoleIn = (role) => {
+  const value = String(role || 'student').trim().toUpperCase();
+  if (!['STUDENT', 'TUTOR', 'ADMIN'].includes(value)) return 'STUDENT';
+  return value;
 };
 
 // Signup
 router.post('/signup', async (req, res) => {
   try {
-    const { email, password, firstName, lastName } = req.body;
+    const { email, password, firstName, lastName, role, organization, className } = req.body;
 
     // Validation
     if (!email || !password) {
@@ -54,6 +47,9 @@ router.post('/signup', async (req, res) => {
         password: hashedPassword,
         firstName: firstName || '',
         lastName: lastName || '',
+        role: normalizeRoleIn(role),
+        organization: organization || null,
+        className: className || null,
       },
     });
 
@@ -68,7 +64,9 @@ router.post('/signup', async (req, res) => {
         email: user.email,
         firstName: user.firstName,
         lastName: user.lastName,
-        role: getUserRoleFromEmail(user.email),
+        role: mapRoleOut(user.role),
+        organization: user.organization,
+        className: user.className,
       },
     });
   } catch (error) {
@@ -114,7 +112,9 @@ router.post('/login', async (req, res) => {
         email: user.email,
         firstName: user.firstName,
         lastName: user.lastName,
-        role: getUserRoleFromEmail(user.email),
+        role: mapRoleOut(user.role),
+        organization: user.organization,
+        className: user.className,
       },
     });
   } catch (error) {
@@ -133,6 +133,9 @@ router.get('/me', verifyToken, async (req, res) => {
         email: true,
         firstName: true,
         lastName: true,
+        role: true,
+        organization: true,
+        className: true,
         createdAt: true,
       },
     });
@@ -143,11 +146,45 @@ router.get('/me', verifyToken, async (req, res) => {
 
     res.json({
       ...user,
-      role: getUserRoleFromEmail(user.email),
+      role: mapRoleOut(user.role),
     });
   } catch (error) {
     console.error('❌ Get user error:', error);
     res.status(500).json({ error: 'Failed to fetch user' });
+  }
+});
+
+// Update user profile (organization/class metadata)
+router.patch('/profile', verifyToken, async (req, res) => {
+  try {
+    const { firstName, lastName, organization, className } = req.body;
+
+    const updatedUser = await prisma.user.update({
+      where: { id: req.userId },
+      data: {
+        ...(firstName !== undefined ? { firstName } : {}),
+        ...(lastName !== undefined ? { lastName } : {}),
+        ...(organization !== undefined ? { organization: organization || null } : {}),
+        ...(className !== undefined ? { className: className || null } : {}),
+      },
+      select: {
+        id: true,
+        email: true,
+        firstName: true,
+        lastName: true,
+        role: true,
+        organization: true,
+        className: true,
+      },
+    });
+
+    return res.json({
+      ...updatedUser,
+      role: mapRoleOut(updatedUser.role),
+    });
+  } catch (error) {
+    console.error('❌ Update profile error:', error);
+    return res.status(500).json({ error: 'Failed to update profile' });
   }
 });
 
