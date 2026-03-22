@@ -54,14 +54,20 @@ const requireTutor = async (req, res, next) => {
 const moderationPatterns = [
   { key: 'credential', level: 'high', pattern: /\b(password|passwd|pwd)\b\s*[:=]/i },
   { key: 'secret', level: 'high', pattern: /\b(api[_-]?key|secret[_-]?key|token)\b\s*[:=]/i },
-  { key: 'financial', level: 'high', pattern: /\b(?:\d[ -]*?){13,19}\b/ },
+  // Stricter card-like pattern to avoid blocking scientific numbers from school PDFs
+  { key: 'financial', level: 'medium', pattern: /\b(?:\d{4}[- ]?){3}\d{4}\b/ },
   { key: 'personal-id', level: 'medium', pattern: /\b(codice fiscale|iban|documento)\b/i },
   { key: 'unsafe-prompt', level: 'medium', pattern: /ignora le regole|bypass|disattiva guardrail/i },
 ];
 
-const sanitizeUserText = (text) => String(text || '').replace(/\s+/g, ' ').trim();
+const sanitizeUserText = (text) => String(text || '')
+  .replace(/\r/g, '')
+  .split('\n')
+  .map((line) => line.replace(/[ \t]+/g, ' ').trim())
+  .filter(Boolean)
+  .join('\n');
 
-const evaluateModeration = (text) => {
+const evaluateModeration = (text, { forMaterial = false } = {}) => {
   const matches = moderationPatterns
     .filter((entry) => entry.pattern.test(text))
     .map((entry) => ({ key: entry.key, level: entry.level }));
@@ -71,8 +77,13 @@ const evaluateModeration = (text) => {
   }
 
   const maxLevel = matches.some((m) => m.level === 'high') ? 'high' : 'medium';
+  const blockKeysForMaterial = new Set(['credential', 'secret', 'unsafe-prompt']);
+  const blocked = forMaterial
+    ? matches.some((m) => blockKeysForMaterial.has(m.key))
+    : matches.some((m) => m.level === 'high' || m.key === 'unsafe-prompt');
+
   return {
-    blocked: true,
+    blocked,
     matches,
     maxLevel,
   };
@@ -376,7 +387,7 @@ router.post('/start', async (req, res) => {
       return res.status(400).json({ error: 'Contenuto deve essere almeno 10 caratteri' });
     }
 
-    const moderation = evaluateModeration(cleanedContent);
+    const moderation = evaluateModeration(cleanedContent, { forMaterial: true });
     if (moderation.blocked) {
       await appendModerationAudit({
         at: new Date().toISOString(),
@@ -386,7 +397,8 @@ router.post('/start', async (req, res) => {
         matches: moderation.matches,
         excerpt: cleanedContent.slice(0, 220),
       });
-      return res.status(400).json({ error: 'Contenuto bloccato dai guardrail di sicurezza. Rimuovi dati sensibili e riprova.' });
+      const matchedKeys = moderation.matches.map((m) => m.key).join(', ');
+      return res.status(400).json({ error: `Contenuto bloccato dai guardrail di sicurezza (${matchedKeys}). Rimuovi dati sensibili e riprova.` });
     }
 
     // Truncate content preview

@@ -44,5 +44,3 @@ coverage/
 *.tmp
 temp/
 
-# Heroku
-Procfile.local
