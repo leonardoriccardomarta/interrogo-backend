@@ -31,7 +31,8 @@ ${content}
 COMPORTAMENTO REALISTICO:
 - Scoraggia risposte generiche: "Spiega meglio", "Cosa intendi con..."
 - Premia risposte precise: "Esatto! Ora dimmi..."
-- Insegue la comprensione, non la memorizzazione`;
+- Insegue la comprensione, non la memorizzazione
+- Se un tema NON è nel materiale, dillo esplicitamente e resta sul perimetro del testo`;
 
     let personalityModifier;
     if (personality === 'strict') {
@@ -174,7 +175,8 @@ Regole importanti:
 - "evidence" deve citare esempi testuali reali della conversazione
 - "reason" deve spiegare in una frase il perché del punteggio
 - I pesi devono sommare a 1.0
-- Se mancano dati, sii conservativo ma non inventare.`;
+- Se mancano dati, sii conservativo ma non inventare.
+- Valuta SOLO nel perimetro del materiale fornito: niente nozioni esterne.`;
 
       const response = await axios.post(
         `${this.groqBaseUrl}/chat/completions`,
@@ -211,10 +213,10 @@ Regole importanti:
       try {
         const jsonText = this.extractJsonObject(responseText);
         const evaluation = JSON.parse(jsonText);
-        return this.normalizeEvaluation(evaluation, conversationHistory);
+        return this.normalizeEvaluation(evaluation, content, conversationHistory);
       } catch (parseError) {
         console.error('Failed to parse evaluation JSON:', responseText);
-        return this.buildFallbackEvaluation(conversationHistory);
+        return this.buildFallbackEvaluation(content, conversationHistory);
       }
     } catch (error) {
       console.error('❌ Groq Evaluation Error:', error.message);
@@ -287,7 +289,110 @@ Regole importanti:
     };
   }
 
-  normalizeEvaluation(rawEvaluation, conversationHistory) {
+  tokenize(text) {
+    return String(text || '')
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((t) => t.length >= 4);
+  }
+
+  getStopwords() {
+    return new Set([
+      'della', 'delle', 'degli', 'dallo', 'dalla', 'dalle', 'dello',
+      'questo', 'questa', 'questi', 'quella', 'quello', 'quindi', 'perche',
+      'sono', 'dopo', 'prima', 'come', 'anche', 'molto', 'stato', 'stati',
+      'dove', 'quando', 'dentro', 'fuori', 'avere', 'essere', 'fatto', 'fatti',
+      'sulla', 'sulle', 'negli', 'nelle', 'dunque', 'oppure', 'allora',
+      'materiale', 'argomento', 'domanda', 'risposta',
+    ]);
+  }
+
+  buildSourceLexicon(content) {
+    const stopwords = this.getStopwords();
+    const freq = new Map();
+    for (const token of this.tokenize(content)) {
+      if (stopwords.has(token)) continue;
+      freq.set(token, (freq.get(token) || 0) + 1);
+    }
+
+    return [...freq.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 250)
+      .map(([token]) => token);
+  }
+
+  computeGroundingMetrics(content, conversationHistory) {
+    const lexicon = new Set(this.buildSourceLexicon(content));
+    const studentMessages = conversationHistory.filter((m) => m.role === 'user');
+
+    let tokensTotal = 0;
+    let tokensInSource = 0;
+
+    for (const msg of studentMessages) {
+      const tokens = this.tokenize(msg.content);
+      tokensTotal += tokens.length;
+      for (const token of tokens) {
+        if (lexicon.has(token)) tokensInSource += 1;
+      }
+    }
+
+    const sourceCoverageRate = tokensTotal > 0 ? tokensInSource / tokensTotal : 0;
+    const dontKnowCount = studentMessages.filter((m) => /non lo so|boh|non ricordo|non saprei/i.test(m.content)).length;
+
+    return {
+      sourceCoverageRate: parseFloat(sourceCoverageRate.toFixed(3)),
+      answerCount: studentMessages.length,
+      dontKnowCount,
+    };
+  }
+
+  applyGroundingAdjustments(evaluation, content, conversationHistory) {
+    const grounded = { ...evaluation, rubric: { criteria: [...(evaluation?.rubric?.criteria || [])] } };
+    const metrics = this.computeGroundingMetrics(content, conversationHistory);
+
+    const adjustCriteria = (delta) => {
+      grounded.rubric.criteria = grounded.rubric.criteria.map((c) => {
+        const shouldAdjust = ['accuratezza', 'completezza', 'collegamenti'].includes(c.key);
+        if (!shouldAdjust) return c;
+        const score = Math.max(0, Math.min(10, c.score + delta));
+        return { ...c, score: parseFloat(score.toFixed(1)) };
+      });
+    };
+
+    if (metrics.sourceCoverageRate < 0.2) {
+      adjustCriteria(-1.3);
+      grounded.weaknesses = Array.from(new Set([
+        ...(grounded.weaknesses || []),
+        'Le risposte risultano poco ancorate al materiale selezionato.',
+      ]));
+      grounded.suggestions = Array.from(new Set([
+        ...(grounded.suggestions || []),
+        'Cita definizioni e passaggi presenti nel PDF/testo durante la risposta.',
+      ]));
+    } else if (metrics.sourceCoverageRate > 0.38) {
+      adjustCriteria(0.5);
+      grounded.strengths = Array.from(new Set([
+        ...(grounded.strengths || []),
+        'Ottimo ancoraggio al materiale fornito.',
+      ]));
+    }
+
+    const weightedScore = grounded.rubric.criteria.reduce((acc, c) => acc + c.score * c.weight, 0);
+    grounded.score = parseFloat(Math.max(0, Math.min(10, weightedScore)).toFixed(1));
+
+    grounded.kpis = {
+      ...(grounded.kpis || {}),
+      ...this.computeKpis(conversationHistory),
+      sourceCoverageRate: metrics.sourceCoverageRate,
+    };
+
+    return grounded;
+  }
+
+  normalizeEvaluation(rawEvaluation, content, conversationHistory) {
     const baseCriteria = this.getDefaultCriteria();
     const criteriaFromModel = rawEvaluation?.rubric?.criteria || [];
 
@@ -306,7 +411,7 @@ Regole importanti:
     const weightedScore = normalizedCriteria.reduce((acc, c) => acc + c.score * c.weight, 0);
     const boundedScore = Math.min(10, Math.max(0, Number(rawEvaluation?.score ?? weightedScore)));
 
-    return {
+    const baseEvaluation = {
       score: parseFloat(boundedScore.toFixed(1)),
       rubric: {
         criteria: normalizedCriteria,
@@ -321,9 +426,11 @@ Regole importanti:
       ],
       kpis: this.computeKpis(conversationHistory),
     };
+
+    return this.applyGroundingAdjustments(baseEvaluation, content, conversationHistory);
   }
 
-  buildFallbackEvaluation(conversationHistory) {
+  buildFallbackEvaluation(content, conversationHistory) {
     const baseScore = this.computeHeuristicScore(conversationHistory);
     const criteria = this.getDefaultCriteria().map((c, idx) => ({
       ...c,
@@ -332,7 +439,7 @@ Regole importanti:
       reason: 'Il modello non ha restituito un JSON valido, applicata valutazione euristica.',
     }));
 
-    return {
+    const fallback = {
       score: baseScore,
       rubric: { criteria },
       strengths: ['Partecipazione all\'esame.'],
@@ -345,6 +452,8 @@ Regole importanti:
       ],
       kpis: this.computeKpis(conversationHistory),
     };
+
+    return this.applyGroundingAdjustments(fallback, content, conversationHistory);
   }
 }
 

@@ -6,6 +6,7 @@ import aiService from '../ai-service.js';
 
 const router = express.Router();
 const prisma = new PrismaClient();
+const MAX_CONTENT_CONTEXT_CHARS = 15000;
 
 const getTargetQuestionsFromDifficulty = (difficulty, examMode = 'standard') => {
   let base;
@@ -401,8 +402,8 @@ router.post('/start', async (req, res) => {
       return res.status(400).json({ error: `Contenuto bloccato dai guardrail di sicurezza (${matchedKeys}). Rimuovi dati sensibili e riprova.` });
     }
 
-    // Truncate content preview
-    const contentPreview = cleanedContent.substring(0, 500);
+    // Keep a larger source context to avoid generic questions detached from the uploaded material
+    const contentPreview = cleanedContent.substring(0, MAX_CONTENT_CONTEXT_CHARS);
 
     const targetQuestions = typeof requestedTargetQuestions === 'number'
       ? Math.min(14, Math.max(4, Math.floor(requestedTargetQuestions)))
@@ -575,7 +576,7 @@ router.post('/message', async (req, res) => {
       questionIndex: teacherQuestionCount + 1,
       targetQuestions,
     });
-    const adaptiveMessage = `${cleanedMessage}\n\n[${personalityDirective}]`;
+    const adaptiveMessage = `${cleanedMessage}\n\n[${personalityDirective}]\n[Vincolo: fai domande SOLO sul materiale caricato in sessione; se manca una info, dichiaralo esplicitamente.]`;
 
     // Prepare conversation history for AI (last 10 messages)
     const recentMessages = session.messages.slice(-10).map(m => ({
