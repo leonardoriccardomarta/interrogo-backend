@@ -1268,4 +1268,48 @@ router.get('/:sessionId', async (req, res) => {
   }
 });
 
+// ===== PAYMENTS & SUBSCRIPTIONS =====
+
+// Get user subscription status
+router.get('/api/subscription/status', verifyToken, async (req, res) => {
+  try {
+    const { getUserSubscriptionStatus } = await import('../stripe-service.js');
+    const status = await getUserSubscriptionStatus(req.userId);
+    res.json(status);
+  } catch (error) {
+    console.error('❌ Subscription status error:', error);
+    res.status(500).json({ error: 'Failed to fetch subscription' });
+  }
+});
+
+// Create Stripe checkout session
+router.post('/api/subscription/checkout', verifyToken, async (req, res) => {
+  try {
+    const { plan } = req.body;
+    if (!['monthly', 'annual'].includes(plan)) {
+      return res.status(400).json({ error: 'Invalid plan' });
+    }
+
+    const { createCheckoutSession } = await import('../stripe-service.js');
+    const session = await createCheckoutSession(req.userId, plan);
+    res.json({ url: session.url });
+  } catch (error) {
+    console.error('❌ Checkout error:', error);
+    res.status(500).json({ error: 'Failed to create checkout session' });
+  }
+});
+
+// Stripe webhook
+router.post('/api/webhooks/stripe', async (req, res) => {
+  try {
+    const { handleWebhook } = await import('../stripe-service.js');
+    const sig = req.headers['stripe-signature'];
+    const result = await handleWebhook(req.rawBody, sig);
+    res.json(result);
+  } catch (error) {
+    console.error('❌ Webhook error:', error);
+    res.status(400).json({ error: 'Webhook failed' });
+  }
+});
+
 export default router;

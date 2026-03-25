@@ -29,6 +29,13 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
+  // Subscription fields
+  plan                 String?  @default("free") // "free", "monthly", "annual"
+  stripeCustomerId     String?
+  stripeSubscriptionId String?
+  planStartDate        DateTime?
+  planEndDate          DateTime?
+
   // Relations
   sessions         InterrogoSession[]
   moderationEvents ModerationEvent[]

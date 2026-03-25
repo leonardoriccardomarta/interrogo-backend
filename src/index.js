@@ -94,6 +94,12 @@ app.use((req, res, next) => {
   next();
 });
 
+// Stripe webhook needs raw body, capture it before JSON parsing
+app.use('/api/webhooks/stripe', express.raw({ type: 'application/json' }), (req, res, next) => {
+  req.rawBody = req.body;
+  next();
+});
+
 app.use(express.json());
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
