@@ -94,8 +94,19 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json());
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use((req, res, next) => {
+  if (req.originalUrl === '/api/auth/billing/webhook') {
+    return next();
+  }
+  return express.json()(req, res, next);
+});
+
+app.use((req, res, next) => {
+  if (req.originalUrl === '/api/auth/billing/webhook') {
+    return next();
+  }
+  return express.urlencoded({ limit: '50mb', extended: true })(req, res, next);
+});
 
 // API index route
 app.get('/', (req, res) => {

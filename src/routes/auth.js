@@ -2,7 +2,13 @@ import express from 'express';
 import bcrypt from 'bcryptjs';
 import { PrismaClient } from '@prisma/client';
 import { generateToken, verifyToken } from '../middleware/auth.js';
-import { createCheckoutSession, createPortalSession, getBillingStatus } from '../billing-service.js';
+import {
+  constructWebhookEvent,
+  createCheckoutSession,
+  createPortalSession,
+  getBillingStatus,
+  processWebhookEvent,
+} from '../billing-service.js';
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -14,6 +20,24 @@ const normalizeRoleIn = (role) => {
   if (!['STUDENT', 'TUTOR', 'ADMIN'].includes(value)) return 'STUDENT';
   return value;
 };
+
+router.post('/billing/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  try {
+    const signature = req.headers['stripe-signature'];
+    const event = constructWebhookEvent({
+      payload: req.body,
+      signature,
+    });
+
+    const outcome = await processWebhookEvent(event);
+    console.log('✅ Stripe webhook:', outcome);
+
+    return res.json({ received: true });
+  } catch (error) {
+    console.error('❌ Stripe webhook error:', error.message);
+    return res.status(400).json({ error: `Webhook error: ${error.message}` });
+  }
+});
 
 // Signup
 router.post('/signup', async (req, res) => {

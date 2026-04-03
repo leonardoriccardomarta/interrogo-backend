@@ -2,6 +2,7 @@ import Stripe from 'stripe';
 
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || '';
 const STRIPE_MONTHLY_PRICE_ID = process.env.STRIPE_MONTHLY_PRICE_ID || '';
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
 
 let stripeClient = null;
 if (STRIPE_SECRET_KEY) {
@@ -107,4 +108,65 @@ export const createPortalSession = async ({ email, returnUrl }) => {
   });
 
   return portal;
+};
+
+export const hasWebhookConfig = () => Boolean(stripeClient && STRIPE_WEBHOOK_SECRET);
+
+export const constructWebhookEvent = ({ payload, signature }) => {
+  if (!stripeClient) {
+    throw new Error('Stripe is not configured');
+  }
+  if (!STRIPE_WEBHOOK_SECRET) {
+    throw new Error('Stripe webhook secret is not configured');
+  }
+  if (!signature) {
+    throw new Error('Missing Stripe signature header');
+  }
+
+  return stripeClient.webhooks.constructEvent(payload, signature, STRIPE_WEBHOOK_SECRET);
+};
+
+export const processWebhookEvent = async (event) => {
+  const type = event?.type || 'unknown';
+  const object = event?.data?.object || {};
+
+  switch (type) {
+    case 'checkout.session.completed':
+      return {
+        handled: true,
+        type,
+        message: 'Checkout session completed',
+        customerEmail: object.customer_details?.email || object.customer_email || null,
+      };
+    case 'customer.subscription.created':
+    case 'customer.subscription.updated':
+    case 'customer.subscription.deleted':
+      return {
+        handled: true,
+        type,
+        message: 'Subscription lifecycle event received',
+        subscriptionId: object.id || null,
+        status: object.status || null,
+      };
+    case 'invoice.paid':
+      return {
+        handled: true,
+        type,
+        message: 'Invoice paid',
+        subscriptionId: object.subscription || null,
+      };
+    case 'invoice.payment_failed':
+      return {
+        handled: true,
+        type,
+        message: 'Invoice payment failed',
+        subscriptionId: object.subscription || null,
+      };
+    default:
+      return {
+        handled: false,
+        type,
+        message: 'Unhandled Stripe event type',
+      };
+  }
 };
