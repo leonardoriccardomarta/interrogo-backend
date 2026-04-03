@@ -2,6 +2,7 @@ import express from 'express';
 import bcrypt from 'bcryptjs';
 import { PrismaClient } from '@prisma/client';
 import { generateToken, verifyToken } from '../middleware/auth.js';
+import { createCheckoutSession, createPortalSession, getBillingStatus } from '../billing-service.js';
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -144,13 +145,93 @@ router.get('/me', verifyToken, async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
+    const billing = await getBillingStatus(user.email);
+
     res.json({
       ...user,
       role: mapRoleOut(user.role),
+      billing,
     });
   } catch (error) {
     console.error('❌ Get user error:', error);
     res.status(500).json({ error: 'Failed to fetch user' });
+  }
+});
+
+router.get('/billing-status', verifyToken, async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { email: true },
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const billing = await getBillingStatus(user.email);
+    return res.json(billing);
+  } catch (error) {
+    console.error('❌ Billing status error:', error);
+    return res.status(500).json({ error: 'Failed to fetch billing status' });
+  }
+});
+
+router.post('/billing/checkout', verifyToken, async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { email: true },
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const successUrl = req.body?.successUrl;
+    const cancelUrl = req.body?.cancelUrl;
+    if (!successUrl || !cancelUrl) {
+      return res.status(400).json({ error: 'successUrl and cancelUrl are required' });
+    }
+
+    const session = await createCheckoutSession({
+      email: user.email,
+      successUrl,
+      cancelUrl,
+    });
+
+    return res.json({ url: session.url, sessionId: session.id });
+  } catch (error) {
+    console.error('❌ Billing checkout error:', error);
+    return res.status(500).json({ error: error.message || 'Failed to create checkout session' });
+  }
+});
+
+router.post('/billing/portal', verifyToken, async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { email: true },
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const returnUrl = req.body?.returnUrl;
+    if (!returnUrl) {
+      return res.status(400).json({ error: 'returnUrl is required' });
+    }
+
+    const session = await createPortalSession({
+      email: user.email,
+      returnUrl,
+    });
+
+    return res.json({ url: session.url });
+  } catch (error) {
+    console.error('❌ Billing portal error:', error);
+    return res.status(500).json({ error: error.message || 'Failed to create billing portal session' });
   }
 });
 

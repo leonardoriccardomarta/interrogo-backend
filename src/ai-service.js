@@ -13,34 +13,34 @@ export class InterrogoAIService {
   }
 
   buildSystemPrompt(personality, content) {
-    const basePrompt = `Tu sei un vero professore italiano che conduce interrogazioni orali.
-RUOLO ESSENZIALE:
-- Una domanda per volta
-- Se risposta cattiva/superficiale → INSISTI con domande di approfondimento
-- Se risposta buona → COMPLIMENTA e APPROFONDISCI con concetti correlati
-- Adatta la difficolta REALE in base alle prestazioni
-- Max 150 parole per risposta
-- Sempre ITALIANO puro
-- Suona come prof VERO, non ChatGPT
-- BASE OBBLIGATORIA: usa SOLO il materiale fornito, evita domande scollegate o troppo generiche
-- Quando possibile cita il riferimento come "[p.X]" se presente nel testo
+    const basePrompt = `You are a real teacher conducting oral exams.
+ESSENTIAL ROLE:
+- Ask one question at a time
+- If an answer is weak/superficial, insist with follow-up questions
+- If an answer is good, acknowledge it and deepen with related concepts
+- Adapt REAL difficulty based on performance
+- Max 150 words per response
+- Always respond in English
+- Sound like a real teacher, not a chatbot
+- STRICT GROUNDING: use ONLY the provided material; avoid disconnected or generic questions
+- When possible, cite source references like "[p.X]" when present
 
-MATERIALE ARGOMENTO:
+SOURCE MATERIAL:
 ${content}
 
-COMPORTAMENTO REALISTICO:
-- Scoraggia risposte generiche: "Spiega meglio", "Cosa intendi con..."
-- Premia risposte precise: "Esatto! Ora dimmi..."
-- Insegue la comprensione, non la memorizzazione
-- Se un tema NON è nel materiale, dillo esplicitamente e resta sul perimetro del testo`;
+REALISTIC BEHAVIOR:
+- Challenge vague answers: "Explain better", "What do you mean by..."
+- Reward precise answers: "Exactly. Now tell me..."
+- Focus on understanding, not memorization
+- If a topic is NOT in the material, state it clearly and stay within scope`;
 
     let personalityModifier;
     if (personality === 'strict') {
-      personalityModifier = '\n\nSTILE DEL PROFESSORE - RIGOROSO (😤):\n- Aspettative ALTE\n- Correggi SUBITO gli errori\n- "Impreciso", "Troppo generico", "Approfondisci"\n- Tono esigente ma giusto\n- Non accetti vaghe risposte';
+      personalityModifier = '\n\nTEACHER STYLE - STRICT (😤):\n- High expectations\n- Correct errors immediately\n- Use language like "Imprecise", "Too generic", "Go deeper"\n- Demanding but fair tone\n- Do not accept vague answers';
     } else if (personality === 'socratic') {
-      personalityModifier = '\n\nSTILE DEL PROFESSORE - SOCRATICO (🧠):\n- Non dare subito la soluzione\n- Guida con domande progressive\n- Fai emergere il ragionamento causa-effetto\n- Se studente è bloccato, spezza in micro-passaggi\n- Mantieni tono calmo ma intellettualmente stimolante';
+      personalityModifier = '\n\nTEACHER STYLE - SOCRATIC (🧠):\n- Do not give the solution immediately\n- Guide with progressive questions\n- Surface cause-effect reasoning\n- If the student is blocked, break it into micro-steps\n- Keep a calm but intellectually stimulating tone';
     } else {
-      personalityModifier = '\n\nSTILE DEL PROFESSORE - INCORAGGIANTE (😊):\n- Aiuta lo studente a trovare la risposta\n- "Bene, continua così", "Esattamente, ora..."\n- Spiega i concetti difficili\n- Tono paziente e supportivo\n- Ambiente positivo e costruttivo';
+      personalityModifier = '\n\nTEACHER STYLE - SUPPORTIVE (😊):\n- Help the student find the answer\n- Use language like "Good, keep going", "Exactly, now..."\n- Explain difficult concepts clearly\n- Patient and supportive tone\n- Build a positive, constructive environment';
     }
 
     return basePrompt + personalityModifier;
@@ -104,13 +104,13 @@ COMPORTAMENTO REALISTICO:
     }
 
     try {
-      const systemPrompt = `Tu sei un professore italiano che spiega concetti in modo semplice e chiaro.
-Argomento: ${topic}
-Riferimento materiale: ${content}
+      const systemPrompt = `You are a teacher who explains concepts in a simple and clear way.
+    Topic: ${topic}
+    Reference material: ${content}
 
-Fornisci una spiegazione BREVE (3-4 frasi) e facile da capire.
-ITALIANO puro.
-${personality === 'strict' ? 'Tono formale e preciso.' : 'Tono amichevole e incoraggiante.'}`;
+    Provide a SHORT explanation (3-4 sentences) that is easy to understand.
+    English only.
+    ${personality === 'strict' ? 'Use a formal and precise tone.' : 'Use a friendly and encouraging tone.'}`;
 
       const response = await axios.post(
         `${this.groqBaseUrl}/chat/completions`,
@@ -118,7 +118,7 @@ ${personality === 'strict' ? 'Tono formale e preciso.' : 'Tono amichevole e inco
           model: 'llama-3.1-8b-instant',
           messages: [
             { role: 'system', content: systemPrompt },
-            { role: 'user', content: `Spiega ${topic}` },
+            { role: 'user', content: `Explain ${topic}` },
           ],
           max_tokens: 300,
           temperature: 0.4,
@@ -132,7 +132,7 @@ ${personality === 'strict' ? 'Tono formale e preciso.' : 'Tono amichevole e inco
         }
       );
 
-      return response.data.choices[0]?.message?.content || 'Concetto spiegato.';
+      return response.data.choices[0]?.message?.content || 'Concept explained.';
     } catch (error) {
       console.error('❌ Groq Concept Explanation Error:', error.message);
       throw new Error(`Failed to explain concept: ${error.message}`);
@@ -145,23 +145,23 @@ ${personality === 'strict' ? 'Tono formale e preciso.' : 'Tono amichevole e inco
     }
 
     try {
-      const evaluationPrompt = `Sei un professore italiano esperto. Valuta questa interrogazione orale e rispondi SOLO con JSON valido.
+      const evaluationPrompt = `You are an expert teacher. Evaluate this oral exam and respond ONLY with valid JSON.
 
-MATERIALE: ${content}
+MATERIAL: ${content}
 
-CONVERSAZIONE:
+CONVERSATION:
 ${conversationHistory.map(m => `${m.role}: ${m.content}`).join('\n')}
 
-Rispondi con SOLO questo JSON (niente altro):
+Respond with ONLY this JSON (nothing else):
 {
   "score": 0,
   "rubric": {
     "criteria": [
-      {"key": "accuratezza", "label": "Accuratezza", "weight": 0.3, "score": 0, "evidence": "", "reason": ""},
-      {"key": "completezza", "label": "Completezza", "weight": 0.25, "score": 0, "evidence": "", "reason": ""},
-      {"key": "lessico", "label": "Lessico disciplinare", "weight": 0.2, "score": 0, "evidence": "", "reason": ""},
-      {"key": "collegamenti", "label": "Collegamenti", "weight": 0.15, "score": 0, "evidence": "", "reason": ""},
-      {"key": "esposizione", "label": "Esposizione", "weight": 0.1, "score": 0, "evidence": "", "reason": ""}
+      {"key": "accuracy", "label": "Accuracy", "weight": 0.3, "score": 0, "evidence": "", "reason": ""},
+      {"key": "completeness", "label": "Completeness", "weight": 0.25, "score": 0, "evidence": "", "reason": ""},
+      {"key": "terminology", "label": "Subject terminology", "weight": 0.2, "score": 0, "evidence": "", "reason": ""},
+      {"key": "connections", "label": "Connections", "weight": 0.15, "score": 0, "evidence": "", "reason": ""},
+      {"key": "delivery", "label": "Delivery", "weight": 0.1, "score": 0, "evidence": "", "reason": ""}
     ]
   },
   "strengths": ["...", "..."],
@@ -170,13 +170,13 @@ Rispondi con SOLO questo JSON (niente altro):
   "studyPlan": ["...", "...", "..."]
 }
 
-Regole importanti:
-- score 0-10 con una cifra decimale
-- "evidence" deve citare esempi testuali reali della conversazione
-- "reason" deve spiegare in una frase il perché del punteggio
-- I pesi devono sommare a 1.0
-- Se mancano dati, sii conservativo ma non inventare.
-- Valuta SOLO nel perimetro del materiale fornito: niente nozioni esterne.`;
+Important rules:
+- score from 0 to 10 with one decimal
+- "evidence" must cite real textual examples from the conversation
+- "reason" must explain the score in one sentence
+- weights must sum to 1.0
+- if data is missing, be conservative and do not invent.
+- evaluate ONLY within the provided material scope: no external knowledge.`;
 
       const response = await axios.post(
         `${this.groqBaseUrl}/chat/completions`,
@@ -185,7 +185,7 @@ Regole importanti:
           messages: [
             {
               role: 'system',
-              content: 'Sei un esperto insegnante italiano. Rispondi SOLO con JSON valido.',
+              content: 'You are an expert teacher. Respond ONLY with valid JSON.',
             },
             {
               role: 'user',
@@ -266,11 +266,11 @@ Regole importanti:
 
   getDefaultCriteria() {
     return [
-      { key: 'accuratezza', label: 'Accuratezza', weight: 0.3, score: 0, evidence: '', reason: '' },
-      { key: 'completezza', label: 'Completezza', weight: 0.25, score: 0, evidence: '', reason: '' },
-      { key: 'lessico', label: 'Lessico disciplinare', weight: 0.2, score: 0, evidence: '', reason: '' },
-      { key: 'collegamenti', label: 'Collegamenti', weight: 0.15, score: 0, evidence: '', reason: '' },
-      { key: 'esposizione', label: 'Esposizione', weight: 0.1, score: 0, evidence: '', reason: '' },
+      { key: 'accuracy', label: 'Accuracy', weight: 0.3, score: 0, evidence: '', reason: '' },
+      { key: 'completeness', label: 'Completeness', weight: 0.25, score: 0, evidence: '', reason: '' },
+      { key: 'terminology', label: 'Subject terminology', weight: 0.2, score: 0, evidence: '', reason: '' },
+      { key: 'connections', label: 'Connections', weight: 0.15, score: 0, evidence: '', reason: '' },
+      { key: 'delivery', label: 'Delivery', weight: 0.1, score: 0, evidence: '', reason: '' },
     ];
   }
 
@@ -355,7 +355,7 @@ Regole importanti:
 
     const adjustCriteria = (delta) => {
       grounded.rubric.criteria = grounded.rubric.criteria.map((c) => {
-        const shouldAdjust = ['accuratezza', 'completezza', 'collegamenti'].includes(c.key);
+        const shouldAdjust = ['accuracy', 'completeness', 'connections'].includes(c.key);
         if (!shouldAdjust) return c;
         const score = Math.max(0, Math.min(10, c.score + delta));
         return { ...c, score: parseFloat(score.toFixed(1)) };
@@ -366,17 +366,17 @@ Regole importanti:
       adjustCriteria(-1.3);
       grounded.weaknesses = Array.from(new Set([
         ...(grounded.weaknesses || []),
-        'Le risposte risultano poco ancorate al materiale selezionato.',
+        'Your answers are weakly grounded in the selected material.',
       ]));
       grounded.suggestions = Array.from(new Set([
         ...(grounded.suggestions || []),
-        'Cita definizioni e passaggi presenti nel PDF/testo durante la risposta.',
+        'Cite definitions and source passages from the PDF/text while answering.',
       ]));
     } else if (metrics.sourceCoverageRate > 0.38) {
       adjustCriteria(0.5);
       grounded.strengths = Array.from(new Set([
         ...(grounded.strengths || []),
-        'Ottimo ancoraggio al materiale fornito.',
+        'Great grounding in the provided source material.',
       ]));
     }
 
@@ -403,8 +403,8 @@ Regole importanti:
       return {
         ...base,
         score: parseFloat(score.toFixed(1)),
-        evidence: String(fromModel.evidence || 'Evidenze testuali limitate.'),
-        reason: String(fromModel.reason || 'Prestazione complessiva in linea con il livello rilevato.'),
+        evidence: String(fromModel.evidence || 'Limited textual evidence available.'),
+        reason: String(fromModel.reason || 'Overall performance aligns with the detected level.'),
       };
     });
 
@@ -416,13 +416,13 @@ Regole importanti:
       rubric: {
         criteria: normalizedCriteria,
       },
-      strengths: rawEvaluation?.strengths || ['Partecipazione attiva all\'interrogazione.'],
-      weaknesses: rawEvaluation?.weaknesses || ['Alcune risposte richiedono maggiore profondità.'],
-      suggestions: rawEvaluation?.suggestions || ['Ripassa i concetti chiave con esempi concreti.'],
+      strengths: rawEvaluation?.strengths || ['Active participation during the oral exam.'],
+      weaknesses: rawEvaluation?.weaknesses || ['Some answers need more depth and precision.'],
+      suggestions: rawEvaluation?.suggestions || ['Review key concepts using concrete examples.'],
       studyPlan: rawEvaluation?.studyPlan || [
-        'Ripassa i concetti principali in blocchi da 20 minuti.',
-        'Allenati con 5 domande orali su definizioni e collegamenti.',
-        'Riformula ad alta voce le risposte in modo più preciso.',
+        'Review core concepts in focused 20-minute blocks.',
+        'Practice with 5 oral questions on definitions and connections.',
+        'Rephrase answers aloud with more precision.',
       ],
       kpis: this.computeKpis(conversationHistory),
     };
@@ -435,20 +435,20 @@ Regole importanti:
     const criteria = this.getDefaultCriteria().map((c, idx) => ({
       ...c,
       score: parseFloat(Math.max(3, Math.min(9.5, baseScore + (idx === 0 ? 0.3 : idx === 1 ? 0.1 : -0.1))).toFixed(1)),
-      evidence: 'Valutazione fallback basata sulla qualità media delle risposte.',
-      reason: 'Il modello non ha restituito un JSON valido, applicata valutazione euristica.',
+      evidence: 'Fallback evaluation based on average answer quality.',
+      reason: 'Model did not return valid JSON, so a heuristic fallback was applied.',
     }));
 
     const fallback = {
       score: baseScore,
       rubric: { criteria },
-      strengths: ['Partecipazione all\'esame.'],
-      weaknesses: ['Aree da approfondire.'],
-      suggestions: ['Rileggi il materiale e prova a rispondere con più dettaglio.'],
+      strengths: ['Participated consistently in the exam.'],
+      weaknesses: ['Some areas still need deeper understanding.'],
+      suggestions: ['Re-read the material and answer with more detail.'],
       studyPlan: [
-        'Ripasso mirato dei punti deboli emersi.',
-        'Allenamento su domande aperte con esempi.',
-        'Verifica finale con mini test orale.',
+        'Targeted review on the weak points identified.',
+        'Practice open questions with concrete examples.',
+        'Run a final mini oral test to validate progress.',
       ],
       kpis: this.computeKpis(conversationHistory),
     };

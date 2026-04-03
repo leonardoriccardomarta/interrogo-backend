@@ -3,6 +3,7 @@ import axios from 'axios';
 import { PrismaClient } from '@prisma/client';
 import { verifyToken } from '../middleware/auth.js';
 import aiService from '../ai-service.js';
+import { getBillingStatus } from '../billing-service.js';
 
 const router = express.Router();
 const prisma = new PrismaClient();
@@ -30,7 +31,7 @@ const deriveTopicFromContent = (content) => {
   const firstLong = lines.find((line) => line.length >= 20);
   if (firstLong) return firstLong.slice(0, 80);
 
-  return 'Argomento dal materiale caricato';
+  return 'Topic from uploaded material';
 };
 
 const isWeakAnswer = (text) => {
@@ -168,19 +169,19 @@ const buildManualIndex = (text) => {
     const page = Math.floor(i / 45) + 1;
 
     if (chapterRegex.test(line) && chapters.length < 24) {
-      chapters.push({ title: line.slice(0, 120), citation: `da pagina ${page}` });
+      chapters.push({ title: line.slice(0, 120), citation: `from page ${page}` });
     }
 
     if (definitionRegex.test(line) && definitions.length < 60) {
-      definitions.push({ text: line.slice(0, 180), citation: `da pagina ${page}` });
+      definitions.push({ text: line.slice(0, 180), citation: `from page ${page}` });
     }
 
     if (formulaRegex.test(line) && /\d|=/.test(line) && formulas.length < 60) {
-      formulas.push({ text: line.slice(0, 180), citation: `da pagina ${page}` });
+      formulas.push({ text: line.slice(0, 180), citation: `from page ${page}` });
     }
 
     if (dateRegex.test(line) && dates.length < 60) {
-      dates.push({ text: line.slice(0, 180), citation: `da pagina ${page}` });
+      dates.push({ text: line.slice(0, 180), citation: `from page ${page}` });
     }
   }
 
@@ -192,7 +193,7 @@ const buildManualIndex = (text) => {
     chunks: splitIntoChunks(text).slice(0, 80).map((chunk, idx) => ({
       id: idx + 1,
       excerpt: chunk.text.slice(0, 240),
-      citation: `da pagina ${Math.floor((chunk.start || 0) / (45 * 80)) + 1}`,
+      citation: `from page ${Math.floor((chunk.start || 0) / (45 * 80)) + 1}`,
       confidence: estimateChunkConfidence(chunk.text),
       tags: [
         /definizione|si definisce/i.test(chunk.text) ? 'definition' : null,
@@ -223,46 +224,46 @@ const toCsv = (rows) => {
 const buildPersonalityDirective = ({ personality, weakAnswer, questionIndex, targetQuestions }) => {
   if (personality === 'socratic') {
     return [
-      'Regola stile socratico:',
-      '- Non dare la soluzione diretta.',
-      '- Usa 1 domanda guida per volta.',
-      weakAnswer ? '- Parti da concetti base e fai emergere il ragionamento.' : '- Aumenta la profondita con collegamenti causa-effetto.',
-      `- Stato sessione: domanda ${questionIndex}/${targetQuestions}.`,
+      'Socratic style rule:',
+      '- Do not provide the direct solution.',
+      '- Ask one guiding question at a time.',
+      weakAnswer ? '- Start from fundamentals and surface the student reasoning.' : '- Increase depth with cause-effect connections.',
+      `- Session state: question ${questionIndex}/${targetQuestions}.`,
     ].join('\n');
   }
 
   if (personality === 'strict') {
     if (weakAnswer) {
       return [
-        'Regola stile severo:',
-        '- Apri con una valutazione breve e diretta (massimo 8 parole).',
-        '- Niente suggerimenti gratuiti: chiedi precisione.',
-        '- Fai UNA domanda di recupero mirata.',
+        'Strict style rule:',
+        '- Open with a brief direct assessment (max 8 words).',
+        '- No free hints: require precision.',
+        '- Ask one targeted recovery question.',
       ].join('\n');
     }
 
     return [
-      'Regola stile severo:',
-      '- Riconosci il livello in modo sobrio, senza complimenti eccessivi.',
-      '- Alza leggermente l\'asticella nella prossima domanda.',
-      `- Stato sessione: domanda ${questionIndex}/${targetQuestions}.`,
+      'Strict style rule:',
+      '- Acknowledge performance in a sober way, without over-praising.',
+      '- Raise the bar slightly in the next question.',
+      `- Session state: question ${questionIndex}/${targetQuestions}.`,
     ].join('\n');
   }
 
   if (weakAnswer) {
     return [
-      'Regola stile incoraggiante:',
-      '- Apri con una frase di supporto breve.',
-      '- Dai un micro-indizio (massimo 1 frase).',
-      '- Fai UNA domanda guidata per verificare la comprensione.',
+      'Supportive style rule:',
+      '- Open with a brief supportive sentence.',
+      '- Give one micro-hint (maximum 1 sentence).',
+      '- Ask one guided question to check understanding.',
     ].join('\n');
   }
 
   return [
-    'Regola stile incoraggiante:',
-    '- Valida la parte corretta della risposta in modo concreto.',
-    '- Estendi con una domanda collegata ma accessibile.',
-    `- Stato sessione: domanda ${questionIndex}/${targetQuestions}.`,
+    'Supportive style rule:',
+    '- Validate the correct part of the answer with concrete feedback.',
+    '- Extend with a related but accessible question.',
+    `- Session state: question ${questionIndex}/${targetQuestions}.`,
   ].join('\n');
 };
 
@@ -373,19 +374,49 @@ router.post('/start', async (req, res) => {
 
     // Validation
     if (!cleanedContent) {
-      return res.status(400).json({ error: 'Contenuto richiesto' });
+      return res.status(400).json({ error: 'Content is required' });
     }
 
     if (!difficulty || difficulty < 1 || difficulty > 10) {
-      return res.status(400).json({ error: 'Difficoltà deve essere tra 1 e 10' });
+      return res.status(400).json({ error: 'Difficulty must be between 1 and 10' });
     }
 
     if (!["strict", "supportive", "socratic"].includes(personality)) {
-      return res.status(400).json({ error: 'Personalità deve essere "strict", "supportive" o "socratic"' });
+      return res.status(400).json({ error: 'Personality must be "strict", "supportive", or "socratic"' });
     }
 
     if (cleanedContent.length < 10) {
-      return res.status(400).json({ error: 'Contenuto deve essere almeno 10 caratteri' });
+      return res.status(400).json({ error: 'Content must be at least 10 characters' });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true },
+    });
+    const billing = await getBillingStatus(user?.email || '');
+    const monthStart = new Date();
+    monthStart.setUTCDate(1);
+    monthStart.setUTCHours(0, 0, 0, 0);
+    const freeMonthlyLimit = Number(process.env.FREE_MONTHLY_EXAM_LIMIT || 10);
+
+    if (!billing.isPro) {
+      const monthlyCount = await prisma.interrogoSession.count({
+        where: {
+          userId,
+          createdAt: {
+            gte: monthStart,
+          },
+        },
+      });
+
+      if (monthlyCount >= freeMonthlyLimit) {
+        return res.status(402).json({
+          error: `Free plan monthly limit reached (${freeMonthlyLimit} exams). Upgrade to Pro to continue.`,
+          code: 'FREE_PLAN_LIMIT_REACHED',
+          freeMonthlyLimit,
+          monthlyCount,
+        });
+      }
     }
 
     const moderation = evaluateModeration(cleanedContent, { forMaterial: true });
@@ -399,7 +430,7 @@ router.post('/start', async (req, res) => {
         excerpt: cleanedContent.slice(0, 220),
       });
       const matchedKeys = moderation.matches.map((m) => m.key).join(', ');
-      return res.status(400).json({ error: `Contenuto bloccato dai guardrail di sicurezza (${matchedKeys}). Rimuovi dati sensibili e riprova.` });
+      return res.status(400).json({ error: `Content blocked by security guardrails (${matchedKeys}). Remove sensitive data and try again.` });
     }
 
     // Keep a larger source context to avoid generic questions detached from the uploaded material
@@ -424,7 +455,7 @@ router.post('/start', async (req, res) => {
     const conversationHistory = [
       {
         role: 'user',
-        content: `Inizia interrogazione basata SOLO sul materiale caricato. Argomento rilevato: ${derivedTopic}. Modalità: ${examMode}. Totale domande target: ${targetQuestions}. Prima domanda: specifica, non generica, e ancorata al materiale.`,
+        content: `Start an oral exam based ONLY on the uploaded material. Detected topic: ${derivedTopic}. Mode: ${examMode}. Target questions: ${targetQuestions}. First question must be specific, grounded in the material, and non-generic.`,
       },
     ];
 
@@ -454,13 +485,13 @@ router.post('/start', async (req, res) => {
       firstQuestion: firstQuestion,
     });
   } catch (error) {
-    console.error('❌ Errore avvio sessione:', error);
+    console.error('❌ Session start error:', error);
     
     if (error.message.includes('Rate limited')) {
       return res.status(429).json({ error: error.message });
     }
 
-    res.status(500).json({ error: error.message || 'Errore nell\'avvio della sessione' });
+    res.status(500).json({ error: error.message || 'Failed to start session' });
   }
 });
 
@@ -487,7 +518,7 @@ router.post('/message', async (req, res) => {
         matches: moderation.matches,
         excerpt: cleanedMessage.slice(0, 220),
       });
-      return res.status(400).json({ error: 'Messaggio bloccato dai guardrail di sicurezza. Rimuovi dati sensibili e riprova.' });
+      return res.status(400).json({ error: 'Message blocked by security guardrails. Remove sensitive data and try again.' });
     }
 
     // Get session
@@ -565,7 +596,7 @@ router.post('/message', async (req, res) => {
         rubric: evaluation.rubric,
         studyPlan: evaluation.studyPlan,
         kpis: evaluation.kpis,
-        message: 'Interrogazione completata.',
+        message: 'Exam completed.',
       });
     }
 
@@ -743,7 +774,7 @@ router.post('/explain', async (req, res) => {
       session.personality
     );
 
-    const teacherMessage = `Capisco. Ti aiuto io: ${explanation}`;
+    const teacherMessage = `I understand. Let me help: ${explanation}`;
 
     await prisma.interrogoMessage.create({
       data: {

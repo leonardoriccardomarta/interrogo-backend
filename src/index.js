@@ -51,14 +51,14 @@ const takeSlaSnapshot = () => {
 const computeAlerts = (snapshot) => {
   const alerts = [];
   if (snapshot.successRate < 0.98) {
-    alerts.push({ level: 'warning', code: 'SUCCESS_RATE_LOW', message: 'Success rate sotto 98%.' });
+    alerts.push({ level: 'warning', code: 'SUCCESS_RATE_LOW', message: 'Success rate is below 98%.' });
   }
   if (snapshot.avgResponseTimeMs > 2000) {
-    alerts.push({ level: 'warning', code: 'LATENCY_HIGH', message: 'Latenza media oltre 2s.' });
+    alerts.push({ level: 'warning', code: 'LATENCY_HIGH', message: 'Average latency is above 2s.' });
   }
   const usedHeapMb = snapshot.memory?.heapUsed ? snapshot.memory.heapUsed / (1024 * 1024) : 0;
   if (usedHeapMb > 512) {
-    alerts.push({ level: 'warning', code: 'MEMORY_HIGH', message: 'Heap usage sopra 512MB.' });
+    alerts.push({ level: 'warning', code: 'MEMORY_HIGH', message: 'Heap usage is above 512MB.' });
   }
   return alerts;
 };

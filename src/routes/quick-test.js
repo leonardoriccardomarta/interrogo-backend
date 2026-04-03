@@ -2,20 +2,51 @@ import express from 'express';
 import { PrismaClient } from '@prisma/client';
 import { verifyToken } from '../middleware/auth.js';
 import aiService from '../ai-service.js';
+import { getBillingStatus } from '../billing-service.js';
 
 const router = express.Router();
 const prisma = new PrismaClient();
 
 router.use(verifyToken);
 
-// START QUICK TEST - 3 domande veloci (demo mode)
+// START QUICK TEST - 3 fast questions
 router.post('/start', async (req, res) => {
   try {
     const { topic, personality = 'supportive' } = req.body;
     const userId = req.userId;
 
     if (!topic || topic.length < 3) {
-      return res.status(400).json({ error: 'Argomento richiesto' });
+      return res.status(400).json({ error: 'Topic is required' });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true },
+    });
+    const billing = await getBillingStatus(user?.email || '');
+    const monthStart = new Date();
+    monthStart.setUTCDate(1);
+    monthStart.setUTCHours(0, 0, 0, 0);
+    const freeMonthlyLimit = Number(process.env.FREE_MONTHLY_EXAM_LIMIT || 10);
+
+    if (!billing.isPro) {
+      const monthlyCount = await prisma.interrogoSession.count({
+        where: {
+          userId,
+          createdAt: {
+            gte: monthStart,
+          },
+        },
+      });
+
+      if (monthlyCount >= freeMonthlyLimit) {
+        return res.status(402).json({
+          error: `Free plan monthly limit reached (${freeMonthlyLimit} exams). Upgrade to Pro to continue.`,
+          code: 'FREE_PLAN_LIMIT_REACHED',
+          freeMonthlyLimit,
+          monthlyCount,
+        });
+      }
     }
 
     // Create quick test session
@@ -30,9 +61,9 @@ router.post('/start', async (req, res) => {
     });
 
     // Generate first question for quick test
-    const content = `Argomento: ${topic}. Questo è un test rapido con 3 domande su questo argomento.`;
+    const content = `Topic: ${topic}. This is a quick test with 3 questions on this topic.`;
     const conversationHistory = [
-      { role: 'user', content: `Quiz veloce: 3 domande su ${topic}. Domanda 1.` }
+      { role: 'user', content: `Quick test: 3 questions on ${topic}. Question 1.` }
     ];
 
     const firstQuestion = await aiService.generateQuestion(
@@ -129,7 +160,7 @@ router.post('/answer', async (req, res) => {
         strengths: evaluation.strengths,
         weaknesses: evaluation.weaknesses,
         suggestions: evaluation.suggestions,
-        message: 'Test completato!',
+        message: 'Test completed!',
       });
     }
 
