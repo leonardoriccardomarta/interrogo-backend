@@ -1,8 +1,8 @@
 import Stripe from 'stripe';
 
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || '';
-const STRIPE_MONTHLY_PRICE_ID = process.env.STRIPE_MONTHLY_PRICE_ID || '';
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
+const PRO_MONTHLY_EUR_CENTS = 999;
 
 let stripeClient = null;
 if (STRIPE_SECRET_KEY) {
@@ -11,7 +11,7 @@ if (STRIPE_SECRET_KEY) {
   });
 }
 
-const hasStripeConfig = () => Boolean(stripeClient && STRIPE_MONTHLY_PRICE_ID);
+const hasStripeConfig = () => Boolean(stripeClient);
 
 const getActiveSubscription = async (email) => {
   if (!hasStripeConfig() || !email) return null;
@@ -31,10 +31,7 @@ const getActiveSubscription = async (email) => {
     expand: ['data.items.data.price'],
   });
 
-  const active = subscriptions.data.find((sub) => {
-    if (!['active', 'trialing'].includes(sub.status)) return false;
-    return sub.items.data.some((item) => item.price?.id === STRIPE_MONTHLY_PRICE_ID);
-  });
+  const active = subscriptions.data.find((sub) => ['active', 'trialing'].includes(sub.status));
 
   return active || null;
 };
@@ -45,7 +42,7 @@ export const getBillingStatus = async (email) => {
       plan: 'free',
       isPro: false,
       stripeReady: false,
-      monthlyPriceId: null,
+      monthlyPriceEur: 9.99,
       subscriptionStatus: null,
       currentPeriodEnd: null,
     };
@@ -56,7 +53,7 @@ export const getBillingStatus = async (email) => {
     plan: subscription ? 'pro' : 'free',
     isPro: Boolean(subscription),
     stripeReady: true,
-    monthlyPriceId: STRIPE_MONTHLY_PRICE_ID,
+    monthlyPriceEur: 9.99,
     subscriptionStatus: subscription?.status || null,
     currentPeriodEnd: subscription?.current_period_end
       ? new Date(subscription.current_period_end * 1000).toISOString()
@@ -75,7 +72,16 @@ export const createCheckoutSession = async ({ email, successUrl, cancelUrl }) =>
     customer_email: email,
     line_items: [
       {
-        price: STRIPE_MONTHLY_PRICE_ID,
+        price_data: {
+          currency: 'eur',
+          product_data: {
+            name: 'Interrogo Pro Monthly',
+          },
+          recurring: {
+            interval: 'month',
+          },
+          unit_amount: PRO_MONTHLY_EUR_CENTS,
+        },
         quantity: 1,
       },
     ],
