@@ -1,5 +1,7 @@
 import axios from 'axios';
 
+const DONT_KNOW_REGEX = /\b(i\s*don'?t\s*know|i\s*do\s*not\s*know|not\s*sure|non\s*lo\s*so|boh|non\s*ricordo|non\s*saprei)\b/i;
+
 export class InterrogoAIService {
   constructor() {
     this.groqApiKey = process.env.GROQ_API_KEY;
@@ -251,7 +253,7 @@ Important rules:
     }
 
     const avgLength = studentMessages.reduce((acc, m) => acc + m.content.length, 0) / studentMessages.length;
-    const dontKnowCount = studentMessages.filter((m) => /non lo so/i.test(m.content)).length;
+    const dontKnowCount = studentMessages.filter((m) => DONT_KNOW_REGEX.test(m.content)).length;
     const dontKnowPenalty = Math.min(2, dontKnowCount * 0.5);
 
     let base = 5.5;
@@ -277,7 +279,7 @@ Important rules:
   computeKpis(conversationHistory) {
     const studentMessages = conversationHistory.filter((m) => m.role === 'user');
     const answerCount = studentMessages.length;
-    const dontKnowCount = studentMessages.filter((m) => /non lo so|boh|non ricordo|non saprei/i.test(m.content)).length;
+    const dontKnowCount = studentMessages.filter((m) => DONT_KNOW_REGEX.test(m.content)).length;
     const avgAnswerLength = answerCount > 0
       ? Math.round(studentMessages.reduce((acc, m) => acc + m.content.length, 0) / answerCount)
       : 0;
@@ -340,7 +342,7 @@ Important rules:
     }
 
     const sourceCoverageRate = tokensTotal > 0 ? tokensInSource / tokensTotal : 0;
-    const dontKnowCount = studentMessages.filter((m) => /non lo so|boh|non ricordo|non saprei/i.test(m.content)).length;
+    const dontKnowCount = studentMessages.filter((m) => DONT_KNOW_REGEX.test(m.content)).length;
 
     return {
       sourceCoverageRate: parseFloat(sourceCoverageRate.toFixed(3)),

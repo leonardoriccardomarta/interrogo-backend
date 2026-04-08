@@ -25,6 +25,23 @@ const mapBillingFromStatus = (status) => {
   return 'free';
 };
 
+const subscriptionStatusPriority = ['active', 'trialing', 'past_due', 'unpaid', 'canceled', 'incomplete', 'incomplete_expired'];
+
+const pickMostRelevantSubscription = (subscriptions) => {
+  if (!Array.isArray(subscriptions) || subscriptions.length === 0) return null;
+
+  const sorted = [...subscriptions].sort((a, b) => {
+    const indexA = subscriptionStatusPriority.indexOf(String(a?.status || '').toLowerCase());
+    const indexB = subscriptionStatusPriority.indexOf(String(b?.status || '').toLowerCase());
+    const rankA = indexA === -1 ? subscriptionStatusPriority.length : indexA;
+    const rankB = indexB === -1 ? subscriptionStatusPriority.length : indexB;
+    if (rankA !== rankB) return rankA - rankB;
+    return (b?.created || 0) - (a?.created || 0);
+  });
+
+  return sorted[0] || null;
+};
+
 const persistBillingState = async ({
   email,
   billingPlan,
@@ -87,7 +104,7 @@ const readStoredBilling = async (email) => {
   }
 };
 
-const getActiveSubscription = async (email) => {
+const getMostRelevantSubscription = async (email) => {
   if (!hasStripeConfig() || !email) return null;
 
   const customers = await stripeClient.customers.search({
@@ -105,9 +122,7 @@ const getActiveSubscription = async (email) => {
     expand: ['data.items.data.price'],
   });
 
-  const active = subscriptions.data.find((sub) => ['active', 'trialing'].includes(sub.status));
-
-  return active || null;
+  return pickMostRelevantSubscription(subscriptions.data);
 };
 
 export const getBillingStatus = async (email) => {
@@ -116,9 +131,10 @@ export const getBillingStatus = async (email) => {
   const storedStatus = String(storedBilling?.billingStatus || 'free').toLowerCase();
 
   if (!hasStripeConfig()) {
+    const plan = mapBillingFromStatus(storedStatus) === 'pro' || storedPlan === 'pro' ? 'pro' : 'free';
     return {
-      plan: storedPlan,
-      isPro: storedPlan === 'pro' || storedStatus === 'active' || storedStatus === 'trialing',
+      plan,
+      isPro: plan === 'pro',
       stripeReady: false,
       monthlyPriceEur: 9.99,
       subscriptionStatus: storedStatus || null,
@@ -128,7 +144,7 @@ export const getBillingStatus = async (email) => {
     };
   }
 
-  const subscription = await getActiveSubscription(email);
+  const subscription = await getMostRelevantSubscription(email);
   if (subscription) {
     const customerId = typeof subscription.customer === 'string' ? subscription.customer : subscription.customer?.id;
     const subscriptionStatus = subscription.status || 'active';
@@ -156,15 +172,23 @@ export const getBillingStatus = async (email) => {
     };
   }
 
+  // Stripe configured + no subscription found: force Free to avoid stale Pro access.
+  await persistBillingState({
+    email,
+    billingPlan: 'free',
+    billingStatus: 'canceled',
+    currentPeriodEnd: null,
+    stripeCustomerId: storedBilling?.stripeCustomerId || null,
+    stripeSubscriptionId: null,
+  });
+
   return {
-    plan: storedPlan,
-    isPro: storedPlan === 'pro' || storedStatus === 'active' || storedStatus === 'trialing',
+    plan: 'free',
+    isPro: false,
     stripeReady: true,
     monthlyPriceEur: 9.99,
-    subscriptionStatus: storedStatus || null,
-    currentPeriodEnd: storedBilling?.billingCurrentPeriodEnd
-      ? new Date(storedBilling.billingCurrentPeriodEnd).toISOString()
-      : null,
+    subscriptionStatus: 'canceled',
+    currentPeriodEnd: null,
   };
 };
 

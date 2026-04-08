@@ -35,7 +35,7 @@ const deriveTopicFromContent = (content) => {
 };
 
 const isWeakAnswer = (text) => {
-  return text.trim().length < 24 || /non lo so|boh|non ricordo|non saprei/i.test(text);
+  return text.trim().length < 24 || /i\s*don'?t\s*know|i\s*do\s*not\s*know|not\s*sure|non lo so|boh|non ricordo|non saprei/i.test(text);
 };
 
 const normalizeTopicKey = (topic) => (topic || '').trim().toLowerCase();

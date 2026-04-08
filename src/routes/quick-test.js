@@ -7,6 +7,13 @@ import { getBillingStatus } from '../billing-service.js';
 const router = express.Router();
 const prisma = new PrismaClient();
 
+const sanitizeInput = (text) => String(text || '')
+  .replace(/\r/g, '')
+  .split('\n')
+  .map((line) => line.replace(/[ \t]+/g, ' ').trim())
+  .filter(Boolean)
+  .join('\n');
+
 router.use(verifyToken);
 
 // START QUICK TEST - 3 fast questions
@@ -14,9 +21,14 @@ router.post('/start', async (req, res) => {
   try {
     const { topic, personality = 'supportive' } = req.body;
     const userId = req.userId;
+    const cleanedTopic = sanitizeInput(topic).slice(0, 160);
 
-    if (!topic || topic.length < 3) {
+    if (!cleanedTopic || cleanedTopic.length < 3) {
       return res.status(400).json({ error: 'Topic is required' });
+    }
+
+    if (!['strict', 'supportive', 'socratic'].includes(personality)) {
+      return res.status(400).json({ error: 'Personality must be "strict", "supportive", or "socratic"' });
     }
 
     const user = await prisma.user.findUnique({
@@ -53,17 +65,17 @@ router.post('/start', async (req, res) => {
     const session = await prisma.interrogoSession.create({
       data: {
         userId,
-        topic,
+        topic: cleanedTopic,
         difficulty: 5,
         personality,
-        contentPreview: 'QUICK TEST MODE - 3 questions only',
+        contentPreview: `QUICK TEST MODE - 3 questions only. Focus topic: ${cleanedTopic}. Ask only topic-relevant questions.`,
       },
     });
 
     // Generate first question for quick test
-    const content = `Topic: ${topic}. This is a quick test with 3 questions on this topic.`;
+    const content = session.contentPreview || `Quick test focused on: ${cleanedTopic}`;
     const conversationHistory = [
-      { role: 'user', content: `Quick test: 3 questions on ${topic}. Question 1.` }
+      { role: 'user', content: `Quick test: 3 questions on ${cleanedTopic}. Question 1.` }
     ];
 
     const firstQuestion = await aiService.generateQuestion(
@@ -79,7 +91,7 @@ router.post('/start', async (req, res) => {
 
     res.status(201).json({
       sessionId: session.id,
-      topic,
+      topic: cleanedTopic,
       personality,
       firstQuestion,
       mode: 'QUICK_TEST',
@@ -99,8 +111,9 @@ router.post('/answer', async (req, res) => {
   try {
     const { sessionId, message } = req.body;
     const userId = req.userId;
+    const cleanedMessage = sanitizeInput(message);
 
-    if (!sessionId || !message) {
+    if (!sessionId || !cleanedMessage) {
       return res.status(400).json({ error: 'Session and message required' });
     }
 
@@ -119,7 +132,7 @@ router.post('/answer', async (req, res) => {
 
     // Save student message
     const savedStudentMessage = await prisma.interrogoMessage.create({
-      data: { sessionId, role: 'student', content: message },
+      data: { sessionId, role: 'student', content: cleanedMessage },
     });
 
     const answerCount = session.messages.filter(m => m.role === 'student').length + 1;
@@ -136,7 +149,7 @@ router.post('/answer', async (req, res) => {
       ];
 
       const evaluation = await aiService.evaluateSession(
-        session.contentPreview || '',
+        session.contentPreview || `Quick test focused on: ${session.topic}`,
         evaluationConversation,
         session.personality
       );
