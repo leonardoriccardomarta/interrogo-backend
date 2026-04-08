@@ -138,11 +138,20 @@ export const processWebhookEvent = async (event) => {
 
   switch (type) {
     case 'checkout.session.completed':
+    case 'checkout.session.async_payment_succeeded':
+    case 'checkout.session.async_payment_failed':
       return {
         handled: true,
         type,
         message: 'Checkout session completed',
         customerEmail: object.customer_details?.email || object.customer_email || null,
+      };
+    case 'customer.subscription.trial_will_end':
+      return {
+        handled: true,
+        type,
+        message: 'Subscription trial will end soon',
+        subscriptionId: object.id || null,
       };
     case 'customer.subscription.created':
     case 'customer.subscription.updated':
@@ -166,6 +175,13 @@ export const processWebhookEvent = async (event) => {
         handled: true,
         type,
         message: 'Invoice payment failed',
+        subscriptionId: object.subscription || null,
+      };
+    case 'invoice.upcoming':
+      return {
+        handled: true,
+        type,
+        message: 'Upcoming invoice notice',
         subscriptionId: object.subscription || null,
       };
     default:
