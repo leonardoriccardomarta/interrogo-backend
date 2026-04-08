@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import authRoutes from './routes/auth.js';
 import interrogoRoutes from './routes/interrogo.js';
 import quickTestRoutes from './routes/quick-test.js';
+import publicChatRoutes from './routes/public-chat.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
@@ -160,6 +161,7 @@ app.get('/health/sla/alerts', (req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/interrogo', interrogoRoutes);
 app.use('/api/quick-test', quickTestRoutes);
+app.use('/api/public', publicChatRoutes);
 
 // 404 handler
 app.use((req, res) => {

@@ -141,6 +141,75 @@ REALISTIC BEHAVIOR:
     }
   }
 
+  async generateLandingAssistantReply({ message, history = [], locale = 'en' }) {
+    if (!this.groqApiKey) {
+      throw new Error('Groq API key not configured');
+    }
+
+    const cleanHistory = Array.isArray(history)
+      ? history
+          .slice(-10)
+          .map((item) => ({
+            role: item?.role === 'assistant' ? 'assistant' : 'user',
+            content: String(item?.content || '').slice(0, 500),
+          }))
+          .filter((item) => item.content.trim().length > 0)
+      : [];
+
+    const systemPrompt = `You are Interrogo's landing page assistant.
+Your goal is conversion and clarity for a pre-revenue SaaS sale demo.
+Rules:
+- Reply in the same language as the user message. Locale hint: ${locale}.
+- Keep answers concise (max 120 words) and practical.
+- Mention only true app capabilities: oral exam simulations, standard/extended/deep modes, quick tests, analytics, free vs pro plan, dashboard billing, multilingual interaction.
+- If user asks for demo/tutorial, provide a short 3-step flow.
+- If user asks about pricing, state: Free plan with monthly cap and Pro at 9.99 EUR/month.
+- Never invent unsupported integrations or guarantees.
+- Tone: confident, modern, helpful.`;
+
+    try {
+      const response = await axios.post(
+        `${this.groqBaseUrl}/chat/completions`,
+        {
+          model: 'llama-3.1-8b-instant',
+          messages: [
+            { role: 'system', content: systemPrompt },
+            ...cleanHistory,
+            { role: 'user', content: String(message || '').slice(0, 800) },
+          ],
+          max_tokens: 280,
+          temperature: 0.45,
+          top_p: 0.9,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${this.groqApiKey}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 15000,
+        }
+      );
+
+      const reply = response.data?.choices?.[0]?.message?.content;
+      if (!reply) {
+        throw new Error('Empty response from Groq');
+      }
+
+      return String(reply).trim();
+    } catch (error) {
+      console.error('❌ Groq Landing Assistant Error:', {
+        message: error.message,
+        status: error.response?.status,
+      });
+
+      if (error.response?.status === 429) {
+        throw new Error('Rate limited by Groq API. Please try again in a moment.');
+      }
+
+      throw new Error(`Failed to generate landing assistant reply: ${error.message}`);
+    }
+  }
+
   async evaluateSession(content, conversationHistory, personality) {
     if (!this.groqApiKey) {
       throw new Error('Groq API key not configured');
