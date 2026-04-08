@@ -1,8 +1,10 @@
 import Stripe from 'stripe';
+import { PrismaClient } from '@prisma/client';
 
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || '';
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
 const PRO_MONTHLY_EUR_CENTS = 999;
+const prisma = new PrismaClient();
 
 let stripeClient = null;
 if (STRIPE_SECRET_KEY) {
@@ -12,6 +14,61 @@ if (STRIPE_SECRET_KEY) {
 }
 
 const hasStripeConfig = () => Boolean(stripeClient);
+
+const mapBillingFromStatus = (status) => {
+  const normalized = String(status || '').toLowerCase();
+  if (['active', 'trialing', 'past_due', 'unpaid'].includes(normalized)) {
+    return 'pro';
+  }
+  return 'free';
+};
+
+const persistBillingState = async ({
+  email,
+  billingPlan,
+  billingStatus,
+  currentPeriodEnd,
+  stripeCustomerId,
+  stripeSubscriptionId,
+}) => {
+  if (!email) return null;
+
+  return prisma.user.updateMany({
+    where: { email },
+    data: {
+      billingPlan,
+      billingStatus,
+      billingCurrentPeriodEnd: currentPeriodEnd || null,
+      stripeCustomerId: stripeCustomerId || null,
+      stripeSubscriptionId: stripeSubscriptionId || null,
+      billingUpdatedAt: new Date(),
+    },
+  });
+};
+
+const resolveCustomerEmail = async ({ customerId, fallbackEmail, metadataEmail }) => {
+  if (metadataEmail) return metadataEmail;
+  if (fallbackEmail) return fallbackEmail;
+  if (!customerId || !stripeClient) return null;
+
+  const customer = await stripeClient.customers.retrieve(customerId);
+  return customer?.deleted ? null : customer?.email || null;
+};
+
+const readStoredBilling = async (email) => {
+  if (!email) return null;
+
+  return prisma.user.findUnique({
+    where: { email },
+    select: {
+      billingPlan: true,
+      billingStatus: true,
+      billingCurrentPeriodEnd: true,
+      stripeCustomerId: true,
+      stripeSubscriptionId: true,
+    },
+  });
+};
 
 const getActiveSubscription = async (email) => {
   if (!hasStripeConfig() || !email) return null;
@@ -37,26 +94,59 @@ const getActiveSubscription = async (email) => {
 };
 
 export const getBillingStatus = async (email) => {
+  const storedBilling = await readStoredBilling(email);
+  const storedPlan = String(storedBilling?.billingPlan || 'free').toLowerCase();
+  const storedStatus = String(storedBilling?.billingStatus || 'free').toLowerCase();
+
   if (!hasStripeConfig()) {
     return {
-      plan: 'free',
-      isPro: false,
+      plan: storedPlan,
+      isPro: storedPlan === 'pro' || storedStatus === 'active' || storedStatus === 'trialing',
       stripeReady: false,
       monthlyPriceEur: 9.99,
-      subscriptionStatus: null,
-      currentPeriodEnd: null,
+      subscriptionStatus: storedStatus || null,
+      currentPeriodEnd: storedBilling?.billingCurrentPeriodEnd
+        ? new Date(storedBilling.billingCurrentPeriodEnd).toISOString()
+        : null,
     };
   }
 
   const subscription = await getActiveSubscription(email);
+  if (subscription) {
+    const customerId = typeof subscription.customer === 'string' ? subscription.customer : subscription.customer?.id;
+    const subscriptionStatus = subscription.status || 'active';
+    const plan = mapBillingFromStatus(subscriptionStatus);
+    const currentPeriodEnd = subscription.current_period_end
+      ? new Date(subscription.current_period_end * 1000).toISOString()
+      : null;
+
+    await persistBillingState({
+      email,
+      billingPlan: plan,
+      billingStatus: subscriptionStatus,
+      currentPeriodEnd,
+      stripeCustomerId: customerId || storedBilling?.stripeCustomerId || null,
+      stripeSubscriptionId: subscription.id || storedBilling?.stripeSubscriptionId || null,
+    });
+
+    return {
+      plan,
+      isPro: plan === 'pro',
+      stripeReady: true,
+      monthlyPriceEur: 9.99,
+      subscriptionStatus,
+      currentPeriodEnd,
+    };
+  }
+
   return {
-    plan: subscription ? 'pro' : 'free',
-    isPro: Boolean(subscription),
+    plan: storedPlan,
+    isPro: storedPlan === 'pro' || storedStatus === 'active' || storedStatus === 'trialing',
     stripeReady: true,
     monthlyPriceEur: 9.99,
-    subscriptionStatus: subscription?.status || null,
-    currentPeriodEnd: subscription?.current_period_end
-      ? new Date(subscription.current_period_end * 1000).toISOString()
+    subscriptionStatus: storedStatus || null,
+    currentPeriodEnd: storedBilling?.billingCurrentPeriodEnd
+      ? new Date(storedBilling.billingCurrentPeriodEnd).toISOString()
       : null,
   };
 };
@@ -70,6 +160,9 @@ export const createCheckoutSession = async ({ email, successUrl, cancelUrl }) =>
     mode: 'subscription',
     payment_method_types: ['card'],
     customer_email: email,
+    metadata: {
+      appEmail: email,
+    },
     line_items: [
       {
         price_data: {
@@ -79,6 +172,9 @@ export const createCheckoutSession = async ({ email, successUrl, cancelUrl }) =>
           },
           recurring: {
             interval: 'month',
+          },
+          metadata: {
+            appEmail: email,
           },
           unit_amount: PRO_MONTHLY_EUR_CENTS,
         },
@@ -136,15 +232,26 @@ export const processWebhookEvent = async (event) => {
   const type = event?.type || 'unknown';
   const object = event?.data?.object || {};
 
+  const metadataEmail = object?.metadata?.appEmail || null;
+  const fallbackEmail = object?.customer_details?.email || object?.customer_email || null;
+
   switch (type) {
     case 'checkout.session.completed':
     case 'checkout.session.async_payment_succeeded':
     case 'checkout.session.async_payment_failed':
+      await persistBillingState({
+        email: metadataEmail || fallbackEmail,
+        billingPlan: 'pro',
+        billingStatus: object.payment_status || 'active',
+        currentPeriodEnd: null,
+        stripeCustomerId: typeof object.customer === 'string' ? object.customer : object.customer?.id || null,
+        stripeSubscriptionId: object.subscription || null,
+      });
       return {
         handled: true,
         type,
         message: 'Checkout session completed',
-        customerEmail: object.customer_details?.email || object.customer_email || null,
+        customerEmail: metadataEmail || fallbackEmail,
       };
     case 'customer.subscription.trial_will_end':
       return {
@@ -156,6 +263,20 @@ export const processWebhookEvent = async (event) => {
     case 'customer.subscription.created':
     case 'customer.subscription.updated':
     case 'customer.subscription.deleted':
+      await persistBillingState({
+        email: await resolveCustomerEmail({
+          customerId: typeof object.customer === 'string' ? object.customer : object.customer?.id || null,
+          fallbackEmail,
+          metadataEmail,
+        }),
+        billingPlan: mapBillingFromStatus(object.status),
+        billingStatus: object.status || 'unknown',
+        currentPeriodEnd: object.current_period_end
+          ? new Date(object.current_period_end * 1000).toISOString()
+          : null,
+        stripeCustomerId: typeof object.customer === 'string' ? object.customer : object.customer?.id || null,
+        stripeSubscriptionId: object.id || null,
+      });
       return {
         handled: true,
         type,
@@ -164,6 +285,20 @@ export const processWebhookEvent = async (event) => {
         status: object.status || null,
       };
     case 'invoice.paid':
+      await persistBillingState({
+        email: await resolveCustomerEmail({
+          customerId: typeof object.customer === 'string' ? object.customer : object.customer?.id || null,
+          fallbackEmail,
+          metadataEmail,
+        }),
+        billingPlan: 'pro',
+        billingStatus: 'active',
+        currentPeriodEnd: object.lines?.data?.[0]?.period?.end
+          ? new Date(object.lines.data[0].period.end * 1000).toISOString()
+          : null,
+        stripeCustomerId: typeof object.customer === 'string' ? object.customer : object.customer?.id || null,
+        stripeSubscriptionId: object.subscription || null,
+      });
       return {
         handled: true,
         type,
@@ -171,6 +306,18 @@ export const processWebhookEvent = async (event) => {
         subscriptionId: object.subscription || null,
       };
     case 'invoice.payment_failed':
+      await persistBillingState({
+        email: await resolveCustomerEmail({
+          customerId: typeof object.customer === 'string' ? object.customer : object.customer?.id || null,
+          fallbackEmail,
+          metadataEmail,
+        }),
+        billingPlan: 'pro',
+        billingStatus: 'past_due',
+        currentPeriodEnd: null,
+        stripeCustomerId: typeof object.customer === 'string' ? object.customer : object.customer?.id || null,
+        stripeSubscriptionId: object.subscription || null,
+      });
       return {
         handled: true,
         type,

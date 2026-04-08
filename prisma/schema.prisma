@@ -26,6 +26,12 @@ model User {
   role         UserRole @default(STUDENT)
   organization String?
   className    String?
+  stripeCustomerId       String?  @unique
+  stripeSubscriptionId   String?  @unique
+  billingPlan            String   @default("free")
+  billingStatus          String   @default("free")
+  billingCurrentPeriodEnd DateTime?
+  billingUpdatedAt       DateTime?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
