@@ -190,9 +190,6 @@ export const createCheckoutSession = async ({ email, successUrl, cancelUrl }) =>
           recurring: {
             interval: 'month',
           },
-          metadata: {
-            appEmail: email,
-          },
           unit_amount: PRO_MONTHLY_EUR_CENTS,
         },
         quantity: 1,
