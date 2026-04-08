@@ -56,6 +56,7 @@ router.post('/signup', async (req, res) => {
     // Check if user exists
     const existingUser = await prisma.user.findUnique({
       where: { email },
+      select: { id: true },
     });
 
     if (existingUser) {
@@ -113,6 +114,16 @@ router.post('/login', async (req, res) => {
     // Find user
     const user = await prisma.user.findUnique({
       where: { email },
+      select: {
+        id: true,
+        email: true,
+        password: true,
+        firstName: true,
+        lastName: true,
+        role: true,
+        organization: true,
+        className: true,
+      },
     });
 
     if (!user) {

@@ -15,6 +15,8 @@ if (STRIPE_SECRET_KEY) {
 
 const hasStripeConfig = () => Boolean(stripeClient);
 
+const isMissingColumnError = (error) => error?.code === 'P2022';
+
 const mapBillingFromStatus = (status) => {
   const normalized = String(status || '').toLowerCase();
   if (['active', 'trialing', 'past_due', 'unpaid'].includes(normalized)) {
@@ -33,17 +35,25 @@ const persistBillingState = async ({
 }) => {
   if (!email) return null;
 
-  return prisma.user.updateMany({
-    where: { email },
-    data: {
-      billingPlan,
-      billingStatus,
-      billingCurrentPeriodEnd: currentPeriodEnd || null,
-      stripeCustomerId: stripeCustomerId || null,
-      stripeSubscriptionId: stripeSubscriptionId || null,
-      billingUpdatedAt: new Date(),
-    },
-  });
+  try {
+    return await prisma.user.updateMany({
+      where: { email },
+      data: {
+        billingPlan,
+        billingStatus,
+        billingCurrentPeriodEnd: currentPeriodEnd || null,
+        stripeCustomerId: stripeCustomerId || null,
+        stripeSubscriptionId: stripeSubscriptionId || null,
+        billingUpdatedAt: new Date(),
+      },
+    });
+  } catch (error) {
+    if (isMissingColumnError(error)) {
+      console.warn('⚠️ Billing columns missing in DB. Skipping billing state persistence until migrations are applied.');
+      return null;
+    }
+    throw error;
+  }
 };
 
 const resolveCustomerEmail = async ({ customerId, fallbackEmail, metadataEmail }) => {
@@ -58,16 +68,23 @@ const resolveCustomerEmail = async ({ customerId, fallbackEmail, metadataEmail }
 const readStoredBilling = async (email) => {
   if (!email) return null;
 
-  return prisma.user.findUnique({
-    where: { email },
-    select: {
-      billingPlan: true,
-      billingStatus: true,
-      billingCurrentPeriodEnd: true,
-      stripeCustomerId: true,
-      stripeSubscriptionId: true,
-    },
-  });
+  try {
+    return await prisma.user.findUnique({
+      where: { email },
+      select: {
+        billingPlan: true,
+        billingStatus: true,
+        billingCurrentPeriodEnd: true,
+        stripeCustomerId: true,
+        stripeSubscriptionId: true,
+      },
+    });
+  } catch (error) {
+    if (isMissingColumnError(error)) {
+      return null;
+    }
+    throw error;
+  }
 };
 
 const getActiveSubscription = async (email) => {
