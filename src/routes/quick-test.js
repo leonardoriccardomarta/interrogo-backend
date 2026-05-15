@@ -14,14 +14,31 @@ const sanitizeInput = (text) => String(text || '')
   .filter(Boolean)
   .join('\n');
 
+const SUPPORTED_LOCALES = ['it', 'en', 'es', 'fr', 'de'];
+
+function serializeMcq(mcq) {
+  return JSON.stringify(mcq);
+}
+
+function parseMcqMessage(content) {
+  try {
+    const parsed = JSON.parse(content);
+    if (parsed?.type === 'mcq') return parsed;
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
 router.use(verifyToken);
 
-// START QUICK TEST - 3 fast questions
+// START QUICK TEST - 3 MCQ questions
 router.post('/start', async (req, res) => {
   try {
-    const { topic, personality = 'supportive' } = req.body;
+    const { topic, personality = 'supportive', locale: rawLocale } = req.body;
     const userId = req.userId;
     const cleanedTopic = sanitizeInput(topic).slice(0, 160);
+    const locale = SUPPORTED_LOCALES.includes(rawLocale) ? rawLocale : 'it';
 
     if (!cleanedTopic || cleanedTopic.length < 3) {
       return res.status(400).json({ error: 'Topic is required' });
@@ -45,9 +62,7 @@ router.post('/start', async (req, res) => {
       const monthlyCount = await prisma.interrogoSession.count({
         where: {
           userId,
-          createdAt: {
-            gte: monthStart,
-          },
+          createdAt: { gte: monthStart },
         },
       });
 
@@ -61,40 +76,42 @@ router.post('/start', async (req, res) => {
       }
     }
 
-    // Create quick test session
+    const material = `Quiz topic: ${cleanedTopic}. Focus on key definitions, causes, relationships, and applications.`;
+
     const session = await prisma.interrogoSession.create({
       data: {
         userId,
         topic: cleanedTopic,
         difficulty: 5,
         personality,
-        contentPreview: `QUICK TEST MODE - 3 questions only. Focus topic: ${cleanedTopic}. Ask only topic-relevant questions.`,
+        locale,
+        contentPreview: `QUICK_TEST_MCQ - 3 multiple-choice questions. Topic: ${cleanedTopic}`,
       },
     });
 
-    // Generate first question for quick test
-    const content = session.contentPreview || `Quick test focused on: ${cleanedTopic}`;
-    const conversationHistory = [
-      { role: 'user', content: `Quick test: 3 questions on ${cleanedTopic}. Question 1.` }
-    ];
-
-    const firstQuestion = await aiService.generateQuestion(
-      content,
-      conversationHistory,
-      5,
+    const mcq = await aiService.generateMcqQuestion(
+      material,
+      cleanedTopic,
+      1,
+      3,
+      locale,
       personality
     );
 
+    const payload = serializeMcq(mcq);
+
     await prisma.interrogoMessage.create({
-      data: { sessionId: session.id, role: 'teacher', content: firstQuestion },
+      data: { sessionId: session.id, role: 'teacher', content: payload },
     });
 
     res.status(201).json({
       sessionId: session.id,
       topic: cleanedTopic,
       personality,
-      firstQuestion,
+      firstQuestion: mcq,
+      mcq,
       mode: 'QUICK_TEST',
+      format: 'mcq',
       totalQuestions: 3,
       answeredCount: 0,
       currentQuestion: 1,
@@ -106,15 +123,15 @@ router.post('/start', async (req, res) => {
   }
 });
 
-// SEND ANSWER in quick test
+// SEND ANSWER in quick test (MCQ: selectedIndex 0-3)
 router.post('/answer', async (req, res) => {
   try {
-    const { sessionId, message } = req.body;
+    const { sessionId, message, selectedIndex } = req.body;
     const userId = req.userId;
     const cleanedMessage = sanitizeInput(message);
 
-    if (!sessionId || !cleanedMessage) {
-      return res.status(400).json({ error: 'Session and message required' });
+    if (!sessionId) {
+      return res.status(400).json({ error: 'Session required' });
     }
 
     const session = await prisma.interrogoSession.findUnique({
@@ -130,18 +147,28 @@ router.post('/answer', async (req, res) => {
       return res.status(400).json({ error: 'Session has already ended' });
     }
 
-    // Save student message
+    const lastTeacher = [...session.messages].reverse().find((m) => m.role === 'teacher');
+    const lastMcq = lastTeacher ? parseMcqMessage(lastTeacher.content) : null;
+
+    let studentContent = cleanedMessage;
+    if (lastMcq && typeof selectedIndex === 'number') {
+      const idx = Math.max(0, Math.min(3, selectedIndex));
+      const chosen = lastMcq.options[idx] || '';
+      const isCorrect = idx === lastMcq.correctIndex;
+      studentContent = `[MCQ] ${chosen} (${isCorrect ? 'correct' : 'wrong'})`;
+    } else if (!cleanedMessage) {
+      return res.status(400).json({ error: 'Answer required' });
+    }
+
     const savedStudentMessage = await prisma.interrogoMessage.create({
-      data: { sessionId, role: 'student', content: cleanedMessage },
+      data: { sessionId, role: 'student', content: studentContent },
     });
 
-    const answerCount = session.messages.filter(m => m.role === 'student').length + 1;
+    const answerCount = session.messages.filter((m) => m.role === 'student').length + 1;
 
-    // Check if it's the last question
     if (answerCount >= 3) {
-      // End test and provide quick evaluation
       const evaluationConversation = [
-        ...session.messages.map(m => ({
+        ...session.messages.map((m) => ({
           role: m.role === 'teacher' ? 'assistant' : 'user',
           content: m.content,
         })),
@@ -149,7 +176,7 @@ router.post('/answer', async (req, res) => {
       ];
 
       const evaluation = await aiService.evaluateSession(
-        session.contentPreview || `Quick test focused on: ${session.topic}`,
+        session.contentPreview || `Quick test: ${session.topic}`,
         evaluationConversation,
         session.personality
       );
@@ -173,36 +200,40 @@ router.post('/answer', async (req, res) => {
         strengths: evaluation.strengths,
         weaknesses: evaluation.weaknesses,
         suggestions: evaluation.suggestions,
+        studyPlan: evaluation.studyPlan,
+        rubric: evaluation.rubric,
         message: 'Test completed!',
       });
     }
 
-    // Generate next question
-    const recentMessages = session.messages.slice(-8).map(m => ({
-      role: m.role === 'teacher' ? 'assistant' : 'user',
-      content: m.content,
-    }));
-
-    recentMessages.push({ role: 'user', content: savedStudentMessage.content });
-
-    const teacherResponse = await aiService.generateQuestion(
-      session.contentPreview || '',
-      recentMessages,
-      5,
+    const mcq = await aiService.generateMcqQuestion(
+      session.contentPreview || session.topic,
+      session.topic,
+      answerCount + 1,
+      3,
+      session.locale || 'it',
       session.personality
     );
 
+    const payload = serializeMcq(mcq);
+
     await prisma.interrogoMessage.create({
-      data: { sessionId, role: 'teacher', content: teacherResponse },
+      data: { sessionId, role: 'teacher', content: payload },
     });
 
     res.json({
-      teacherResponse,
+      teacherResponse: payload,
+      mcq,
       totalQuestions: 3,
       answeredCount: answerCount,
       currentQuestion: answerCount + 1,
       questionsRemaining: Math.max(0, 3 - answerCount),
       isComplete: false,
+      lastAnswerCorrect:
+        lastMcq && typeof selectedIndex === 'number'
+          ? selectedIndex === lastMcq.correctIndex
+          : undefined,
+      explanation: lastMcq?.explanation,
     });
   } catch (error) {
     console.error('Quick test answer error:', error);

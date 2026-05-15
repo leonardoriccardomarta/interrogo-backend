@@ -47,7 +47,8 @@ REALISTIC BEHAVIOR:
 - Challenge vague answers: "Explain better", "What do you mean by..."
 - Reward precise answers: "Exactly. Now tell me..."
 - Focus on understanding, not memorization
-- If a topic is NOT in the material, state it clearly and stay within scope`;
+- If a topic is NOT in the material, state it clearly and stay within scope
+- QUESTION QUALITY: ask about specific concepts from the material; avoid yes/no; no generic questions; never repeat a question already asked`;
 
     let personalityModifier;
     if (personality === 'strict') {
@@ -111,6 +112,83 @@ REALISTIC BEHAVIOR:
 
       throw new Error(`Failed to generate question: ${error.message}`);
     }
+  }
+
+  parseMcqJson(raw) {
+    const cleaned = String(raw || '')
+      .replace(/```json/gi, '')
+      .replace(/```/g, '')
+      .trim();
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    const parsed = JSON.parse(match ? match[0] : cleaned);
+    if (!parsed?.question || !Array.isArray(parsed.options) || parsed.options.length < 4) {
+      throw new Error('Invalid MCQ shape');
+    }
+    const options = parsed.options.slice(0, 4).map((o) => String(o).trim()).filter(Boolean);
+    if (options.length < 4) throw new Error('Need 4 options');
+    const correctIndex = Number(parsed.correctIndex);
+    if (!Number.isInteger(correctIndex) || correctIndex < 0 || correctIndex > 3) {
+      throw new Error('Invalid correctIndex');
+    }
+    return {
+      type: 'mcq',
+      question: String(parsed.question).trim(),
+      options,
+      correctIndex,
+      explanation: String(parsed.explanation || '').trim(),
+    };
+  }
+
+  async generateMcqQuestion(content, topic, questionNumber, totalQuestions, locale = 'it', personality = 'supportive') {
+    if (!this.groqApiKey) {
+      throw new Error('Groq API key not configured');
+    }
+
+    const language = resolveLanguage(locale);
+    const systemPrompt = `You create high-quality multiple-choice quiz questions for students.
+Rules:
+- Respond ONLY with valid JSON, no markdown
+- Language: ${language}
+- Topic: ${topic}
+- Question ${questionNumber} of ${totalQuestions}
+- Ground every question in the provided material only
+- One clearly correct answer; three plausible distractors (not obvious jokes)
+- Avoid "all of the above" / "none of the above"
+- Test understanding, not trick wording
+
+JSON shape:
+{"question":"...","options":["A","B","C","D"],"correctIndex":0,"explanation":"short why the answer is correct"}
+
+Material:
+${content}`;
+
+    const response = await axios.post(
+      `${this.groqBaseUrl}/chat/completions`,
+      {
+        model: 'llama-3.1-8b-instant',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          {
+            role: 'user',
+            content: `Create multiple-choice question #${questionNumber} on "${topic}".`,
+          },
+        ],
+        max_tokens: 450,
+        temperature: 0.35,
+        top_p: 0.9,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${this.groqApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 15000,
+      }
+    );
+
+    const raw = response.data.choices[0]?.message?.content;
+    if (!raw) throw new Error('Empty MCQ response');
+    return this.parseMcqJson(raw);
   }
 
   async explainConcept(topic, content, personality, locale = 'it') {
