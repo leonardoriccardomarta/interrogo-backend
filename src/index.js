@@ -100,7 +100,7 @@ app.use((req, res, next) => {
   if (req.originalUrl === '/api/auth/billing/webhook') {
     return next();
   }
-  return express.json()(req, res, next);
+  return express.json({ limit: '50mb' })(req, res, next);
 });
 
 app.use((req, res, next) => {

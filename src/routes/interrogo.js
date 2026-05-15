@@ -7,7 +7,33 @@ import { getBillingStatus } from '../billing-service.js';
 
 const router = express.Router();
 const prisma = new PrismaClient();
-const MAX_CONTENT_CONTEXT_CHARS = 15000;
+const MAX_CONTENT_CONTEXT_CHARS = 80_000;
+const EXAM_MCQ_MARKER = 'EXAM_MCQ';
+
+function serializeMcq(mcq) {
+  return JSON.stringify(mcq);
+}
+
+function parseMcqMessage(content) {
+  try {
+    const parsed = JSON.parse(content);
+    if (parsed?.type === 'mcq') return parsed;
+  } catch {
+    /* plain text */
+  }
+  return null;
+}
+
+function isMcqExamSession(session) {
+  return String(session?.contentPreview || '').includes(EXAM_MCQ_MARKER);
+}
+
+function stripMcqMarker(preview) {
+  const raw = String(preview || '');
+  if (!raw.includes(EXAM_MCQ_MARKER)) return raw;
+  const idx = raw.indexOf('|');
+  return idx >= 0 ? raw.slice(idx + 1) : raw.replace(EXAM_MCQ_MARKER, '').trim();
+}
 
 const getTargetQuestionsFromDifficulty = (difficulty, examMode = 'standard') => {
   let base;
@@ -375,6 +401,7 @@ router.post('/start', async (req, res) => {
       targetQuestions: requestedTargetQuestions,
       locale: rawLocale,
       manualIndexSummary,
+      sessionFormat: rawSessionFormat,
     } = req.body;
     const userId = req.userId;
     const supportedLocales = ['it', 'en', 'es', 'fr', 'de'];
@@ -384,6 +411,7 @@ router.post('/start', async (req, res) => {
       cleanedContent = `${cleanedContent}\n\n[Structured index for exam focus]\n${String(manualIndexSummary).trim().slice(0, 4000)}`;
     }
     const examMode = ['standard', 'extended', 'deep'].includes(rawExamMode) ? rawExamMode : 'standard';
+    const sessionFormat = rawSessionFormat === 'quiz' ? 'quiz' : 'oral';
     const derivedTopic = topic?.trim() ? topic.trim() : deriveTopicFromContent(cleanedContent);
 
     // Validation
@@ -447,14 +475,16 @@ router.post('/start', async (req, res) => {
       return res.status(400).json({ error: `Content blocked by security guardrails (${matchedKeys}). Remove sensitive data and try again.` });
     }
 
-    // Keep a larger source context to avoid generic questions detached from the uploaded material
-    const contentPreview = cleanedContent.substring(0, MAX_CONTENT_CONTEXT_CHARS);
+    const materialSlice = cleanedContent.substring(0, MAX_CONTENT_CONTEXT_CHARS);
+    const contentPreview =
+      sessionFormat === 'quiz'
+        ? `${EXAM_MCQ_MARKER}|${materialSlice}`
+        : materialSlice;
 
     const targetQuestions = typeof requestedTargetQuestions === 'number'
       ? Math.min(14, Math.max(4, Math.floor(requestedTargetQuestions)))
       : getTargetQuestionsFromDifficulty(difficulty, examMode);
 
-    // Create session
     const session = await prisma.interrogoSession.create({
       data: {
         userId,
@@ -466,7 +496,34 @@ router.post('/start', async (req, res) => {
       },
     });
 
-    // Generate first question
+    if (sessionFormat === 'quiz') {
+      const mcq = await aiService.generateMcqQuestion(
+        materialSlice,
+        derivedTopic,
+        1,
+        targetQuestions,
+        locale,
+        personality
+      );
+      const payload = serializeMcq(mcq);
+
+      await prisma.interrogoMessage.create({
+        data: { sessionId: session.id, role: 'teacher', content: payload },
+      });
+
+      return res.status(201).json({
+        sessionId: session.id,
+        topic: session.topic,
+        difficulty: session.difficulty,
+        personality: session.personality,
+        examMode,
+        sessionFormat: 'quiz',
+        targetQuestions,
+        firstQuestion: payload,
+        mcq,
+      });
+    }
+
     const conversationHistory = [
       {
         role: 'user',
@@ -482,7 +539,6 @@ router.post('/start', async (req, res) => {
       locale
     );
 
-    // Save teacher's first question
     await prisma.interrogoMessage.create({
       data: {
         sessionId: session.id,
@@ -497,8 +553,9 @@ router.post('/start', async (req, res) => {
       difficulty: session.difficulty,
       personality: session.personality,
       examMode,
+      sessionFormat: 'oral',
       targetQuestions,
-      firstQuestion: firstQuestion,
+      firstQuestion,
     });
   } catch (error) {
     console.error('❌ Session start error:', error);
@@ -514,14 +571,19 @@ router.post('/start', async (req, res) => {
 // Send Message (user answer)
 router.post('/message', async (req, res) => {
   try {
-    const { sessionId, message, targetQuestions: requestedTargetQuestions, examMode: rawExamMode } = req.body;
+    const {
+      sessionId,
+      message,
+      targetQuestions: requestedTargetQuestions,
+      examMode: rawExamMode,
+      selectedIndex,
+    } = req.body;
     const userId = req.userId;
     const cleanedMessage = sanitizeUserText(message);
     const examMode = ['standard', 'extended', 'deep'].includes(rawExamMode) ? rawExamMode : 'standard';
 
-    // Validation
-    if (!sessionId || !cleanedMessage) {
-      return res.status(400).json({ error: 'Session ID and message are required' });
+    if (!sessionId) {
+      return res.status(400).json({ error: 'Session ID is required' });
     }
 
     const moderation = evaluateModeration(cleanedMessage);
@@ -559,7 +621,103 @@ router.post('/message', async (req, res) => {
       return res.status(400).json({ error: 'Session has already ended' });
     }
 
-    // Save student message
+    const targetQuestions = typeof requestedTargetQuestions === 'number'
+      ? Math.min(14, Math.max(4, Math.floor(requestedTargetQuestions)))
+      : getTargetQuestionsFromDifficulty(session.difficulty, examMode);
+    const teacherQuestionCount = session.messages.filter((m) => m.role === 'teacher').length;
+    const answeredCount = session.messages.filter((m) => m.role === 'student').length;
+
+    if (isMcqExamSession(session)) {
+      const lastTeacher = [...session.messages].reverse().find((m) => m.role === 'teacher');
+      const lastMcq = lastTeacher ? parseMcqMessage(lastTeacher.content) : null;
+
+      let studentContent = cleanedMessage;
+      if (lastMcq && typeof selectedIndex === 'number') {
+        const idx = Math.max(0, Math.min(3, selectedIndex));
+        const chosen = lastMcq.options[idx] || '';
+        const isCorrect = idx === lastMcq.correctIndex;
+        studentContent = `[MCQ] ${chosen} (${isCorrect ? 'correct' : 'wrong'})`;
+      } else if (!cleanedMessage) {
+        return res.status(400).json({ error: 'Answer required' });
+      }
+
+      await prisma.interrogoMessage.create({
+        data: { sessionId, role: 'student', content: studentContent },
+      });
+
+      const newAnsweredCount = answeredCount + 1;
+
+      if (newAnsweredCount >= targetQuestions) {
+        const evaluationConversation = [
+          ...session.messages.map((m) => ({
+            role: m.role === 'teacher' ? 'assistant' : 'user',
+            content: m.content,
+          })),
+          { role: 'user', content: studentContent },
+        ];
+
+        const evaluation = await aiService.evaluateSession(
+          stripMcqMarker(session.contentPreview),
+          evaluationConversation,
+          session.personality
+        );
+
+        await prisma.interrogoSession.update({
+          where: { id: sessionId },
+          data: {
+            finalScore: evaluation.score,
+            finalFeedback: JSON.stringify(evaluation),
+            endedAt: new Date(),
+          },
+        });
+
+        return res.json({
+          isComplete: true,
+          score: evaluation.score,
+          strengths: evaluation.strengths,
+          weaknesses: evaluation.weaknesses,
+          suggestions: evaluation.suggestions,
+          rubric: evaluation.rubric,
+          studyPlan: evaluation.studyPlan,
+          kpis: evaluation.kpis,
+          message: 'Exam completed.',
+        });
+      }
+
+      const material = stripMcqMarker(session.contentPreview);
+      const mcq = await aiService.generateMcqQuestion(
+        material,
+        session.topic,
+        newAnsweredCount + 1,
+        targetQuestions,
+        session.locale || 'it',
+        session.personality
+      );
+      const payload = serializeMcq(mcq);
+
+      await prisma.interrogoMessage.create({
+        data: { sessionId, role: 'teacher', content: payload },
+      });
+
+      return res.json({
+        isComplete: false,
+        teacherResponse: payload,
+        mcq,
+        targetQuestions,
+        currentQuestion: newAnsweredCount + 1,
+        questionsRemaining: Math.max(0, targetQuestions - newAnsweredCount),
+        lastAnswerCorrect:
+          lastMcq && typeof selectedIndex === 'number'
+            ? selectedIndex === lastMcq.correctIndex
+            : undefined,
+        explanation: lastMcq?.explanation,
+      });
+    }
+
+    if (!cleanedMessage) {
+      return res.status(400).json({ error: 'Message is required' });
+    }
+
     const studentMessage = await prisma.interrogoMessage.create({
       data: {
         sessionId,
@@ -568,11 +726,7 @@ router.post('/message', async (req, res) => {
       },
     });
 
-    const targetQuestions = typeof requestedTargetQuestions === 'number'
-      ? Math.min(14, Math.max(4, Math.floor(requestedTargetQuestions)))
-      : getTargetQuestionsFromDifficulty(session.difficulty, examMode);
-    const teacherQuestionCount = session.messages.filter((m) => m.role === 'teacher').length;
-    const answeredCount = session.messages.filter((m) => m.role === 'student').length + 1;
+    const answeredCountAfter = answeredCount + 1;
 
     // Convert messages to conversation format and include current answer
     const evaluationConversation = [
@@ -586,7 +740,6 @@ router.post('/message', async (req, res) => {
       },
     ];
 
-    // Auto-complete after target number of questions (3-5 based on difficulty)
     if (teacherQuestionCount >= targetQuestions) {
       const evaluation = await aiService.evaluateSession(
         session.contentPreview || '',
@@ -660,8 +813,8 @@ router.post('/message', async (req, res) => {
       studentMessage: cleanedMessage,
       teacherResponse: teacherResponse,
       targetQuestions,
-      currentQuestion: Math.min(targetQuestions, answeredCount + 1),
-      questionsRemaining: Math.max(0, targetQuestions - answeredCount),
+      currentQuestion: Math.min(targetQuestions, answeredCountAfter + 1),
+      questionsRemaining: Math.max(0, targetQuestions - answeredCountAfter),
       messageCount: session.messages.length + 2, // +2 for new messages
     });
   } catch (error) {
